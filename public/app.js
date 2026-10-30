@@ -1,7 +1,7 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
-import { simulateHands } from './handsim.js';
+import { COMBO_TAG, START_TAG, simulateHands } from './handsim.js';
 import { MAX_TAGS, applyOps, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
@@ -12,6 +12,8 @@ const KIND_ORDER = { monster: 0, spell: 1, trap: 2 };
 const LIMIT_MARK = { 0: '禁', 1: '制', 2: '準' };
 const LIMIT_NAME = { 0: '禁止', 1: '制限', 2: '準制限' };
 const STORE_KEY = 'ygoTeamDeck.v1';
+// 最初から選べるタグ。初手シミュレーションでは、初動と組み合わせ初動で「動けるか」も計算する
+const PRESET_TAGS = [START_TAG, COMBO_TAG, '誘発'];
 
 const FILTERS = [
   { key: 'attr', label: '属性', items: [[12, '闇'], [11, '光'], [15, '地'], [13, '水'], [14, '炎'], [16, '風'], [17, '神']] },
@@ -340,7 +342,7 @@ function renderDetail() {
     });
     const deck = state.decks[selected.deck];
     const tags = deck.tags[cid] || [];
-    const known = [...new Set(state.decks.flatMap((d) => Object.values(d.tags).flat()))].filter((t) => !tags.includes(t));
+    const known = [...new Set([...PRESET_TAGS, ...state.decks.flatMap((d) => Object.values(d.tags).flat())])].filter((t) => !tags.includes(t));
     actions = `<div class="act-row">
         <span>デッキ${DECK_LABELS[selected.deck]}・${SECTION_LABEL[selected.section]}: <b>${here}</b>枚</span>
         <button type="button" data-dminus>−1</button><button type="button" data-dplus>+1</button><button type="button" data-dremove>すべて外す</button>
@@ -351,7 +353,7 @@ function renderDetail() {
         ${tags.map((t) => `<span class="tag-chip">${esc(t)}<button type="button" data-untag="${esc(t)}" title="タグを外す">×</button></span>`).join('')}
         ${tags.length < MAX_TAGS ? `<input id="tagInput" list="tagOptions" maxlength="20" placeholder="タグを追加（Enter）"><datalist id="tagOptions">${known.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>` : ''}
       </div>
-      ${known.length ? `<div class="act-row tag-row"><span class="muted">使ったタグ:</span>${known.map((t) => `<button type="button" class="tag-pick" data-addtag="${esc(t)}">＋${esc(t)}</button>`).join('')}</div>` : ''}`;
+      ${known.length && tags.length < MAX_TAGS ? `<div class="act-row tag-row"><span class="muted">タグを選ぶ:</span>${known.map((t) => `<button type="button" class="tag-pick" data-addtag="${esc(t)}">＋${esc(t)}</button>`).join('')}</div>` : ''}`;
   }
   const stats = [c.attr, c.level, c.pscale && `スケール ${c.pscale}`, c.species, c.effect, c.atk, c.def].filter(Boolean).join(' / ');
   box.innerHTML = `<div class="detail-body">
@@ -820,7 +822,7 @@ function openHandSim(deckIdx) {
 
 function renderHandSim() {
   const d = state.decks[handDeck];
-  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE });
+  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE, order: PRESET_TAGS, comboSameName: $('comboSameName').checked });
   const pct = (n) => `${((n / res.trials) * 100).toFixed(1)}%`;
   $('handTitle').textContent = `初手シミュレーション：デッキ${DECK_LABELS[handDeck]}「${d.name}」`;
   if (res.size < HAND_SIZE) {
@@ -833,7 +835,7 @@ function renderHandSim() {
     $('handResults').innerHTML = '<p>メインデッキのカードにタグが付いていません。デッキのカードをクリックし、詳細欄の「タグ」から付けてください。</p>';
     return;
   }
-  $('handResults').innerHTML = res.results
+  $('handResults').innerHTML = renderStartResult(res, pct) + renderPairResult(res, pct) + res.results
     .map((r) => {
       const atLeastOne = res.trials - r.dist[0];
       const multi = r.cards.some((e) => e.count >= 2);
@@ -864,6 +866,45 @@ function renderHandSim() {
         </section>`;
     })
     .join('');
+}
+
+// 初動（初動 1 枚、または組み合わせ初動 2 枚）で動けた割合と、動けたうえでほかのタグもそろった割合
+function renderStartResult(res, pct) {
+  const s = res.start;
+  if (!s) return '';
+  const tagged = (tag) => res.results.find((r) => r.tag === tag)?.copies || 0;
+  const rule = s.comboSameName ? '同名の2枚でも成立' : '別名の2枚が必要';
+  const notes = [`初動 ${tagged(START_TAG)}枚・組み合わせ初動 ${tagged(COMBO_TAG)}枚（組み合わせ初動は${rule}）`];
+  if (!s.comboSameName && s.sameNameOnly) notes.push(`組み合わせ初動が同名の2枚しかなく動けなかった手札: ${pct(s.sameNameOnly)}（同名でも組み合わせられるなら、下のチェックで成立に数えられます）`);
+  if (s.comboSameName && s.sameNameOnly) notes.push(`このうち、組み合わせ初動が同名の2枚だけで成立した手札: ${pct(s.sameNameOnly)}`);
+  const rows = [
+    ['初動1枚以上で動ける', s.bySingle],
+    ['初動がなく、組み合わせ初動2枚で動ける', s.byComboOnly],
+    ...s.withTag.map((w) => [`動けて、さらに「${esc(w.tag)}」も1枚以上（初動に使ったカードとは別）`, w.count]),
+  ];
+  return `<section class="hand-tag hand-summary">
+      <h3>初動で動ける <b>${pct(s.count)}</b></h3>
+      <p class="hand-cards">${notes.join('<br>')}</p>
+      <table>
+        <thead><tr><th>手札</th><th>割合</th><th>回数</th></tr></thead>
+        <tbody>${rows.map(([label, n]) => `<tr><td>${label}</td><td class="bar-cell"><span class="bar" style="width:${(n / res.trials) * 100}%"></span><span>${pct(n)}</span></td><td class="num">${n.toLocaleString()}</td></tr>`).join('')}</tbody>
+      </table>
+    </section>`;
+}
+
+// タグ 2 つを別々のカードでそろえた割合
+function renderPairResult(res, pct) {
+  if (!res.pairs.length) return '';
+  return `<section class="hand-tag hand-summary">
+      <h3>タグの組み合わせ</h3>
+      <p class="hand-cards">2つのタグのカードを、別々のカードでそれぞれ1枚以上引いた割合です（1枚で両方のタグを持つカードは、片方にしか数えません）。</p>
+      <table>
+        <thead><tr><th>組み合わせ</th><th>割合</th><th>回数</th></tr></thead>
+        <tbody>${res.pairs
+          .map((p) => `<tr><td>「${esc(p.a)}」＋「${esc(p.b)}」</td><td class="bar-cell"><span class="bar" style="width:${(p.count / res.trials) * 100}%"></span><span>${pct(p.count)}</span></td><td class="num">${p.count.toLocaleString()}</td></tr>`)
+          .join('')}</tbody>
+      </table>
+    </section>`;
 }
 
 function openTeamDialog() {
@@ -1272,6 +1313,7 @@ function bindEvents() {
   // ヘッダー
   $('teamStatus').addEventListener('click', openTeamDialog);
   $('rerunHands').addEventListener('click', renderHandSim);
+  $('comboSameName').addEventListener('change', renderHandSim);
   $('undoBtn').addEventListener('click', () => restore(undoStack, redoStack));
   $('redoBtn').addEventListener('click', () => restore(redoStack, undoStack));
   $('importBtn').addEventListener('click', () => openImport());
