@@ -1,0 +1,13 @@
+{
+  "name": "yugioh-team-deck",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "日本選手権チーム戦ルール対応の 3 デッキ同時編集ツール",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

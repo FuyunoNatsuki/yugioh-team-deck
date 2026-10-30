@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>チーム戦デッキビルダー</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>チーム戦デッキビルダー</h1>
+    <span id="regulation" class="muted">禁止・制限リストを読み込み中…</span>
+    <button id="teamStatus" class="status" type="button"></button>
+    <div class="spacer"></div>
+    <div class="actions">
+      <button id="undoBtn" type="button" title="元に戻す (Ctrl+Z)">↶</button>
+      <button id="redoBtn" type="button" title="やり直す (Ctrl+Y)">↷</button>
+      <button id="importBtn" type="button" class="primary">ニューロンからインポート</button>
+      <button id="imageBtn" type="button" class="primary">画像から登録</button>
+      <button id="exportBtn" type="button">テキスト出力</button>
+      <button id="saveBtn" type="button" title="3デッキをファイルに保存">保存</button>
+      <button id="loadBtn" type="button" title="保存したファイルを読み込む">読込</button>
+      <input id="loadFile" type="file" accept=".json,application/json" hidden>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="search-pane" id="searchPane">
+      <form id="searchForm" class="search-form">
+        <div class="row">
+          <input id="keyword" type="search" placeholder="キーワードを入力" autocomplete="off">
+          <button type="submit" class="primary">検索</button>
+        </div>
+        <div class="row selects">
+          <select id="stype" aria-label="検索対象">
+            <option value="1">カード名</option>
+            <option value="2">カードテキスト</option>
+            <option value="3">ペンデュラム効果</option>
+            <option value="4">カードNo</option>
+          </select>
+          <select id="ctype" aria-label="カードの種類">
+            <option value="">すべてのカード</option>
+            <option value="1">モンスター</option>
+            <option value="2">魔法</option>
+            <option value="3">罠</option>
+          </select>
+          <select id="sort" aria-label="並び順">
+            <option value="1">50音順</option>
+            <option value="21">発売日（新しい順）</option>
+            <option value="20">発売日（古い順）</option>
+            <option value="2">レベル／ランク（大きい順）</option>
+            <option value="3">レベル／ランク（小さい順）</option>
+            <option value="4">攻撃力（大きい順）</option>
+            <option value="5">攻撃力（小さい順）</option>
+            <option value="6">守備力（大きい順）</option>
+            <option value="7">守備力（小さい順）</option>
+            <option value="11">リンク数（多い順）</option>
+            <option value="12">リンク数（少ない順）</option>
+          </select>
+        </div>
+        <details id="filters">
+          <summary>条件を絞って検索 <span id="filterCount"></span></summary>
+          <div id="filterGroups"></div>
+          <div class="row">
+            <label>種類の条件
+              <select id="othercon">
+                <option value="2">いずれかを含む（or）</option>
+                <option value="1">すべてを含む（and）</option>
+              </select>
+            </label>
+            <button type="button" id="clearFilters">条件をクリア</button>
+          </div>
+        </details>
+      </form>
+
+      <div class="result-head">
+        <span id="resultInfo" class="muted">カードを検索してください</span>
+        <label class="side-toggle"><input type="checkbox" id="toSide"> サイドへ追加</label>
+      </div>
+      <div id="results" class="results"></div>
+      <div class="pager">
+        <button id="prevPage" type="button" disabled>‹ 前へ</button>
+        <span id="pageInfo"></span>
+        <button id="nextPage" type="button" disabled>次へ ›</button>
+      </div>
+      <section id="detail" class="detail" aria-live="polite"></section>
+    </aside>
+
+    <section class="decks-pane">
+      <nav class="deck-tabs" id="deckTabs"></nav>
+      <div class="decks" id="decks"></div>
+      <p class="hint">ドラッグでデッキ間・メイン／サイド間を移動（1枚ずつ）／検索欄へドラッグか右クリックで1枚外す／カードをクリックすると詳細と移動ボタンを表示</p>
+    </section>
+  </main>
+
+  <dialog id="importDialog">
+    <form method="dialog" id="importForm">
+      <h2>遊戯王ニューロンからインポート</h2>
+      <p class="muted">ニューロンのデッキ画面で「公開」にしたデッキの URL（<code>member_deck.action?…cgid=…&amp;dno=…</code>）を貼り付けてください。</p>
+      <label>デッキURL<input id="importUrl" type="url" required placeholder="https://www.db.yugioh-card.com/yugiohdb/member_deck.action?..."></label>
+      <label>読み込み先
+        <select id="importTarget"></select>
+      </label>
+      <p class="muted">読み込み先のデッキは置き換えられます。</p>
+      <p id="importError" class="error"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate type="submit">キャンセル</button>
+        <button id="importSubmit" class="primary" value="ok" type="submit">インポート</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="imageDialog" class="wide">
+    <h2>画像からレシピを登録</h2>
+    <div id="imageStep1">
+      <p class="muted">ニューロンのデッキ画像（メイン・エクストラ・サイドの一覧画像）を選ぶか、ここにドロップ／Ctrl+V で貼り付けてください。カードの絵柄を、同じテーマの公開デッキに入っているカードと見比べて照合します（ブラウザ内で処理します）。</p>
+      <label>デッキのテーマ（照合の候補を集めるキーワード）
+        <input id="imageKeyword" type="search" placeholder="例: ラビュリンス" autocomplete="off">
+      </label>
+      <label class="dropzone" id="dropzone">
+        <input id="imageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        <img id="imagePreview" alt="" hidden>
+        <span id="dropText">クリックして画像を選ぶ／ドロップ／貼り付け</span>
+      </label>
+      <p id="imageStatus" class="muted"></p>
+      <div class="dialog-actions">
+        <button type="button" data-close>キャンセル</button>
+        <button id="readImage" type="button" class="primary" disabled>読み取る</button>
+      </div>
+    </div>
+    <div id="imageStep2" hidden>
+      <p class="muted">左が画像から切り出したカード、右が照合したカードです。<span class="tag fuzzy">要確認</span> は似ているカードが複数あったもの、<span class="tag none">未確定</span> は候補に見つからなかったものです。候補から選ぶか、名前で探してください（探した結果は絵柄の近い順に並びます）。</p>
+      <div class="review">
+        <div class="review-image"><img id="reviewImage" alt="読み込んだ画像"></div>
+        <div class="review-list" id="reviewList"></div>
+      </div>
+      <div class="dialog-actions">
+        <label class="inline">登録先 <select id="imageTarget"></select></label>
+        <span class="muted">（登録先のデッキは置き換えられます）</span>
+        <div class="spacer"></div>
+        <button type="button" id="backToStep1">画像を選び直す</button>
+        <button type="button" data-close>キャンセル</button>
+        <button id="registerImage" type="button" class="primary">登録</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="exportDialog">
+    <form method="dialog">
+      <h2>テキスト出力</h2>
+      <textarea id="exportText" readonly rows="20"></textarea>
+      <div class="dialog-actions">
+        <button id="copyExport" type="button" class="primary">コピー</button>
+        <button value="close" type="submit">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="teamDialog">
+    <form method="dialog">
+      <h2>チーム内の採用枚数</h2>
+      <p class="muted">日本選手権チーム戦ルール: 同名カードはチームの3デッキ合計で3枚まで（制限は1枚、準制限は2枚、禁止は0枚）。メイン・エクストラ・サイドすべてを数えます。</p>
+      <div class="team-table-wrap"><table id="teamTable"></table></div>
+      <div class="dialog-actions"><button value="close" type="submit">閉じる</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
