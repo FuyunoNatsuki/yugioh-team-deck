@@ -98,18 +98,41 @@
   <dialog id="importDialog">
     <form method="dialog" id="importForm">
       <h2>遊戯王ニューロンからインポート</h2>
-      <p class="muted">ニューロンで発行した<b>デッキコード</b>（例: <code>1sgb47h</code>）か、「公開」にしたデッキの URL（<code>member_deck.action?…cgid=…&amp;dno=…</code>）を入力してください。</p>
+      <p class="muted">ニューロンで発行した<b>デッキコード</b>（例: <code>1sgb47h</code>）か、「公開」にしたデッキの URL（<code>member_deck.action?…cgid=…&amp;dno=…</code>）を入力してください。デッキコードなら、非公開のデッキも読み込めます。</p>
       <label>デッキコード または デッキURL<input id="importUrl" type="text" required autocomplete="off" placeholder="1sgb47h ／ https://www.db.yugioh-card.com/yugiohdb/member_deck.action?..."></label>
       <label>読み込み先
         <select id="importTarget"></select>
       </label>
       <p class="muted">読み込み先のデッキは置き換えられます。</p>
       <p id="importError" class="error"></p>
+      <details class="private-deck">
+        <summary>デッキコードがない非公開のデッキを読み込む</summary>
+        <p class="muted">非公開のデッキは、ニューロンでデッキコードを発行して上の欄に入れるのがいちばん手軽です。コードを発行しない場合は、下のブックマークレットを使って、ログインしているブラウザから送ります（ログイン情報やデッキの内容はこのツールのサーバーを通りません）。</p>
+        <ol>
+          <li>次のボタンをブックマークバーにドラッグして登録します: <a id="bookmarklet" class="bookmarklet" href="#">チーム戦デッキへ送る</a>
+            <button type="button" id="copyBookmarklet">コードをコピー</button>
+            <span class="muted">（ドラッグできないときは、新しいブックマークを作り、URL 欄にコピーしたコードを貼り付けます）</span></li>
+          <li>PC のブラウザでニューロン（db.yugioh-card.com）にログインし、読み込みたいデッキのデッキレシピ画面を開きます。</li>
+          <li>登録したブックマークを押すと、このツールが開いてデッキを受け取ります。</li>
+        </ol>
+        <p class="muted">スマホのアプリで作ったデッキは、デッキ画像を保存して「画像から登録」でも読み込めます。</p>
+      </details>
       <div class="dialog-actions">
         <button value="cancel" formnovalidate type="submit">キャンセル</button>
         <button id="importSubmit" class="primary" value="ok" type="submit">インポート</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="receiveDialog">
+    <h2>ニューロンからデッキを受け取りました</h2>
+    <p id="receiveInfo"></p>
+    <label>読み込み先 <select id="receiveTarget"></select></label>
+    <p class="muted">読み込み先のデッキは置き換えられます。</p>
+    <div class="dialog-actions">
+      <button type="button" data-close>キャンセル</button>
+      <button id="receiveSubmit" type="button" class="primary">読み込む</button>
+    </div>
   </dialog>
 
   <dialog id="imageDialog" class="wide">

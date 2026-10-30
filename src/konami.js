@@ -24,11 +24,18 @@ function cached(key, ttlMs, fn) {
 }
 
 async function getHtml(pathAndQuery) {
+  return (await getPage(pathAndQuery)).html;
+}
+
+// cookie を付けて開き、返ってきた cookie も返す（同じセッションで続けて開くため）
+async function getPage(pathAndQuery, cookie = '') {
   const res = await fetch(BASE + pathAndQuery, {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'ja' },
+    headers: { 'User-Agent': UA, 'Accept-Language': 'ja', ...(cookie ? { Cookie: cookie } : {}) },
   });
   if (!res.ok) throw new HttpError(502, `カードデータベースの応答エラー (${res.status})`);
-  return res.text();
+  const setCookies = res.headers.getSetCookie?.() || [];
+  const received = setCookies.map((c) => c.split(';')[0]).filter(Boolean);
+  return { html: await res.text(), cookie: [cookie, ...received].filter(Boolean).join('; ') };
 }
 
 // ---- HTML の読み取り ----
@@ -170,18 +177,55 @@ export function fetchLimits() {
   });
 }
 
-// ニューロンのデッキコード（例: 1sgb47h）から、そのデッキのページを公開デッキ検索で探して読み込む
+// ニューロンのデッキコード（例: 1sgb47h）から読み込む。デッキコードがあれば、ログインしていなくても
+// 非公開のデッキを見られる。デッキ検索の結果に出るリンク（deck_code 付き）を、同じセッションのまま開く
 function fetchDeckByCode(code) {
   return cached('deckcode:' + code, 5 * 60 * 1000, async () => {
     const q = new URLSearchParams({ ope: '1', sess: '1', rp: '10', deck_code: code, request_locale: 'ja' });
-    const html = await getHtml('/deck_search.action?' + q);
-    const m = html.match(/cgid=([0-9a-f]{32})&(?:amp;)?dno=(\d+)/);
-    if (!m) throw new HttpError(404, `デッキコード「${code}」のデッキが見つかりません。コードが正しいか、デッキが公開されているか確認してください`);
-    return fetchDeck(`https://www.db.yugioh-card.com/yugiohdb/member_deck.action?cgid=${m[1]}&dno=${m[2]}`);
+    const search = await getPage('/deck_search.action?' + q);
+    const href = search.html.match(/href="\/yugiohdb(\/member_deck\.action\?[^"]*deck_code=[^"]*)"/)?.[1];
+    if (!href) throw new HttpError(404, `デッキコード「${code}」のデッキが見つかりません。コードが正しいか確認してください`);
+    const page = await getPage(decode(href), search.cookie);
+    return parseDeckPage(page.html, `デッキコード「${code}」のデッキを開けませんでした`);
   });
 }
 
-// ニューロンで公開・共有されたデッキの URL（member_deck.action?cgid=...&dno=...）かデッキコードから読み込む
+// デッキのページ（member_deck.action）から、枠ごとのカードと枚数を読み取る
+function parseDeckPage(html, notFound) {
+  const details = Object.fromEntries(parseRows(html).map((c) => [c.cid, c]));
+  const tables = {
+    monster_list: ['main', 'monster'],
+    spell_list: ['main', 'spell'],
+    trap_list: ['main', 'trap'],
+    extra_list: ['extra', 'monster'],
+    side_list: ['side', null],
+  };
+  const deck = { main: [], extra: [], side: [] };
+  const cards = {};
+  for (const [id, [section, kind]] of Object.entries(tables)) {
+    const start = html.indexOf(`<table id="${id}"`);
+    if (start < 0) continue;
+    const table = html.slice(start, html.indexOf('</table>', start));
+    for (const row of table.split(/<tr class='[^']*row'/).slice(1)) {
+      const cid = pick(row, /cid=(\d+)/);
+      const count = Number(pick(row, /<td class="num">\s*<span>(\d+)<\/span>/));
+      if (!cid || !count) continue;
+      deck[section].push({ cid, count });
+      cards[cid] = details[cid] || {
+        cid,
+        name: clean(pick(row, /<span>([\s\S]*?)<\/span>/)),
+        kind: kind || 'monster',
+        isExtra: section === 'extra',
+        img: imageMap(html)[cid] || '',
+      };
+    }
+  }
+  if (!deck.main.length && !deck.extra.length && !deck.side.length) throw new HttpError(404, notFound);
+  const name = clean(pick(html, /<header id="broad_title">[\s\S]*?<h1>([\s\S]*?)<\/h1>/));
+  return { name, ...deck, cards };
+}
+
+// ニューロンのデッキの URL（member_deck.action?cgid=...&dno=...）かデッキコードから読み込む
 export function fetchDeck(input) {
   const text = String(input).trim();
   if (/^[0-9a-z]{4,20}$/i.test(text)) return fetchDeckByCode(text.toLowerCase());
@@ -196,41 +240,12 @@ export function fetchDeck(input) {
   if (!/(^|\.)db\.yugioh-card\.com$/.test(url.hostname) || !/^[0-9a-f]{32}$/.test(cgid) || !/^\d{1,6}$/.test(dno)) {
     throw new HttpError(400, '遊戯王ニューロンのデッキ URL（cgid と dno を含むもの）を入力してください');
   }
+  // デッキコード付きの URL（デッキ検索の結果のリンクなど）なら、コードから開く（非公開でも見られる）
+  const code = url.searchParams.get('deck_code') || '';
+  if (/^[0-9a-z]{4,20}$/i.test(code)) return fetchDeckByCode(code.toLowerCase());
   return cached(`deck:${cgid}:${dno}`, 60 * 1000, async () => {
     const html = await getHtml(`/member_deck.action?ope=1&cgid=${cgid}&dno=${dno}&request_locale=ja`);
-    const details = Object.fromEntries(parseRows(html).map((c) => [c.cid, c]));
-    const tables = {
-      monster_list: ['main', 'monster'],
-      spell_list: ['main', 'spell'],
-      trap_list: ['main', 'trap'],
-      extra_list: ['extra', 'monster'],
-      side_list: ['side', null],
-    };
-    const deck = { main: [], extra: [], side: [] };
-    const cards = {};
-    for (const [id, [section, kind]] of Object.entries(tables)) {
-      const start = html.indexOf(`<table id="${id}"`);
-      if (start < 0) continue;
-      const table = html.slice(start, html.indexOf('</table>', start));
-      for (const row of table.split(/<tr class='[^']*row'/).slice(1)) {
-        const cid = pick(row, /cid=(\d+)/);
-        const count = Number(pick(row, /<td class="num">\s*<span>(\d+)<\/span>/));
-        if (!cid || !count) continue;
-        deck[section].push({ cid, count });
-        cards[cid] = details[cid] || {
-          cid,
-          name: clean(pick(row, /<span>([\s\S]*?)<\/span>/)),
-          kind: kind || 'monster',
-          isExtra: section === 'extra',
-          img: imageMap(html)[cid] || '',
-        };
-      }
-    }
-    if (!deck.main.length && !deck.extra.length && !deck.side.length) {
-      throw new HttpError(404, 'デッキが見つかりません。デッキが「公開」になっているか確認してください');
-    }
-    const name = clean(pick(html, /<header id="broad_title">[\s\S]*?<h1>([\s\S]*?)<\/h1>/));
-    return { name, ...deck, cards };
+    return parseDeckPage(html, 'デッキが見つかりません。非公開のデッキは、デッキコードを入力するか、ブックマークレットで読み込んでください');
   });
 }
 

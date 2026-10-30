@@ -1,6 +1,7 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
+import { sendDeckFromNeuron } from './bookmarklet.js';
 import { COMBO_TAG, DEFAULT_DRAW, DRAW_TAG, START_TAG, needOf, simulateHands } from './handsim.js';
 import { MAX_DRAW, MAX_TAGS, applyOps, cleanDeckDraws, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
 
@@ -509,6 +510,111 @@ async function doImport() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ---- 非公開デッキ（ブックマークレット） ----
+// ニューロンのデッキレシピ画面で実行すると、このツールが #deck=… 付きで開く（public/bookmarklet.js）
+
+let receivedDeck = null; // { deck, cards }
+
+// コードの # や改行で URL が途中で切れないよう、全体をパーセントエンコードする（実行時にブラウザが元に戻す）
+const bookmarkletCode = () => `javascript:${encodeURIComponent(`(${sendDeckFromNeuron.toString()})(${JSON.stringify(location.origin)})`)}`;
+
+// # 以降で受け取ったデッキを確かめる。形が正しくないものは読まない（外から渡される値なので）
+function parseReceivedDeck(data) {
+  if (!data || data.v !== 1) return null;
+  const deck = { name: typeof data.name === 'string' ? data.name.slice(0, 40) : '', main: [], extra: [], side: [] };
+  const cards = {};
+  for (const s of SECTIONS) {
+    if (!Array.isArray(data[s])) return null;
+    for (const row of data[s].slice(0, 100)) {
+      const [cid, count, name, kind, img] = Array.isArray(row) ? row : [];
+      if (!/^\d{1,8}$/.test(cid) || !Number.isInteger(count) || count < 1 || count > 60) continue;
+      const e = deck[s].find((x) => x.cid === cid);
+      if (e) e.count = Math.min(60, e.count + count);
+      else deck[s].push({ cid, count });
+      cards[cid] ||= {
+        cid,
+        name: typeof name === 'string' && name ? name.slice(0, 100) : `cid:${cid}`,
+        kind: kind === 'spell' || kind === 'trap' ? kind : 'monster',
+        isExtra: kind === 'extra',
+        img: /^cid=\d+&ciid=\d+&enc=[\w-]+$/.test(img) ? img : '',
+      };
+    }
+  }
+  return deck.main.length || deck.extra.length || deck.side.length ? { deck, cards } : null;
+}
+
+function readReceivedDeck() {
+  const m = location.hash.match(/^#deck=(.+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    receivedDeck = parseReceivedDeck(JSON.parse(decodeURIComponent(m[1])));
+  } catch {
+    receivedDeck = null;
+  }
+  if (!receivedDeck) return toast('受け取ったデッキを読み取れませんでした', 'error');
+  const { deck } = receivedDeck;
+  const total = (s) => sectionTotal(deck[s]);
+  $('receiveInfo').textContent = `「${deck.name || '名前なし'}」 メイン ${total('main')}枚・エクストラ ${total('extra')}枚・サイド ${total('side')}枚`;
+  $('receiveTarget').innerHTML = state.decks.map((d, i) => `<option value="${i}">${DECK_LABELS[i]}: ${esc(d.name)}</option>`).join('');
+  $('receiveTarget').value = String(state.active);
+  $('receiveDialog').showModal();
+}
+
+// ブックマークレットで受け取るのは名前と画像だけなので、カードの詳しい情報（テキストなど）を検索で補う
+async function completeCardInfo(cids) {
+  let next = 0;
+  let changed = false;
+  await Promise.all(
+    Array.from({ length: 4 }, async () => {
+      while (next < cids.length) {
+        const card = state.cards[cids[next++]];
+        if (!card || card.text || card.name.startsWith('cid:')) continue;
+        try {
+          const res = await fetch('/api/search?' + new URLSearchParams({ keyword: card.name, stype: '1', rp: '50' }));
+          const found = (await res.json()).cards?.find((c) => c.cid === card.cid);
+          if (found) {
+            state.cards[card.cid] = found;
+            changed = true;
+          }
+        } catch {}
+      }
+    })
+  );
+  if (changed) {
+    save();
+    render();
+  }
+}
+
+function bindReceiveEvents() {
+  const link = $('bookmarklet');
+  link.href = bookmarkletCode();
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    toast('このボタンはブックマークバーにドラッグして登録してください');
+  });
+  $('copyBookmarklet').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(bookmarkletCode());
+      toast('ブックマークレットのコードをコピーしました');
+    } catch {
+      toast('コピーできませんでした。ボタンをブックマークバーにドラッグしてください', 'error');
+    }
+  });
+  $('receiveDialog').addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]')) $('receiveDialog').close();
+  });
+  $('receiveSubmit').addEventListener('click', () => {
+    if (!receivedDeck) return;
+    const { deck, cards } = receivedDeck;
+    receivedDeck = null;
+    $('receiveDialog').close();
+    applyDeck(Number($('receiveTarget').value), deck, cards);
+    completeCardInfo(Object.keys(cards));
+  });
 }
 
 // ---- 画像から登録 ----
@@ -1459,7 +1565,9 @@ renderFilters();
 bindEvents();
 bindImageEvents();
 bindRoomEvents();
+bindReceiveEvents();
 render();
 loadLimits();
+readReceivedDeck(); // ルームに入ると URL が書き換わるので、その前に # のデッキを読む
 const sharedRoom = new URLSearchParams(location.search).get('room');
 if (ROOM_ID.test(sharedRoom || '')) enterRoom(sharedRoom, false);

@@ -329,6 +329,23 @@ dialog textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; f
 #teamTable tr.over td { color: var(--bad); font-weight: 700; }
 #teamTable tr.full td:last-child { color: var(--warn); }
 
+/* 非公開デッキ（ブックマークレット） */
+.private-deck { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.private-deck summary { cursor: pointer; color: var(--accent); }
+.private-deck ol { padding-left: 20px; margin: 6px 0; font-size: 13px; }
+.private-deck li { margin: 4px 0; }
+.bookmarklet {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  text-decoration: none;
+  font-weight: 600;
+  cursor: grab;
+}
+.private-deck button { font-size: 12px; padding: 1px 8px; }
+
 /* 画像から登録 */
 dialog.wide { width: min(1100px, calc(100vw - 32px)); }
 .dialog-actions { align-items: center; flex-wrap: wrap; }
