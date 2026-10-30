@@ -1,8 +1,8 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
-import { COMBO_TAG, START_TAG, needOf, simulateHands } from './handsim.js';
-import { MAX_TAGS, applyOps, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
+import { COMBO_TAG, DEFAULT_DRAW, DRAW_TAG, START_TAG, needOf, simulateHands } from './handsim.js';
+import { MAX_DRAW, MAX_TAGS, applyOps, cleanDeckDraws, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
 const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サイド' };
@@ -12,8 +12,9 @@ const KIND_ORDER = { monster: 0, spell: 1, trap: 2 };
 const LIMIT_MARK = { 0: '禁', 1: '制', 2: '準' };
 const LIMIT_NAME = { 0: '禁止', 1: '制限', 2: '準制限' };
 const STORE_KEY = 'ygoTeamDeck.v1';
-// 最初から選べるタグ。初手シミュレーションでは、初動と組み合わせ初動で「動けるか」も計算する
-const PRESET_TAGS = [START_TAG, COMBO_TAG, '誘発'];
+// 最初から選べるタグ。初手シミュレーションでは、初動と組み合わせ初動で「動けるか」を計算し、
+// ドロー系は指定した枚数だけ追加で引いた手札でも計算する
+const PRESET_TAGS = [START_TAG, COMBO_TAG, '誘発', DRAW_TAG];
 
 const FILTERS = [
   { key: 'attr', label: '属性', items: [[12, '闇'], [11, '光'], [15, '地'], [13, '水'], [14, '炎'], [16, '風'], [17, '神']] },
@@ -46,21 +47,26 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 // ---- 状態 ----
 
-// tags はデッキごとのカードのタグ（cid → タグの一覧）
+// tags はデッキごとのカードのタグ（cid → タグの一覧）、draws はドロー系のカードのドロー枚数（cid → 枚数）
 function newDeck(label) {
-  return { name: `デッキ${label}`, main: [], extra: [], side: [], tags: {} };
+  return { name: `デッキ${label}`, main: [], extra: [], side: [], tags: {}, draws: {} };
 }
 
-// タグ機能より前に保存したデッキにも tags を足す
-function withTags(decks) {
-  for (const d of decks) d.tags = cleanDeckTags(d.tags);
+// タグやドロー枚数の機能より前に保存したデッキにも、その欄を足す
+function normalizeDecks(decks) {
+  for (const d of decks) {
+    d.tags = cleanDeckTags(d.tags);
+    d.draws = cleanDeckDraws(d.draws);
+  }
   return decks;
 }
+
+const drawOf = (deck, cid) => deck.draws[cid] || DEFAULT_DRAW;
 
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.decks) && s.decks.length === 3) return { active: 0, cards: {}, ...s, decks: withTags(s.decks) };
+    if (s && Array.isArray(s.decks) && s.decks.length === 3) return { active: 0, cards: {}, ...s, decks: normalizeDecks(s.decks) };
   } catch {}
   return { decks: DECK_LABELS.map(newDeck), cards: {}, active: 0 };
 }
@@ -170,7 +176,6 @@ function removeCard(cid, deckIdx, section, n = 1) {
   }
 }
 
-// デッキ間の移動はチームの合計枚数を変えないので、枠の種類と枚数上限だけ確認する
 // デッキのカードのタグを付け直す（空ならタグを外す）
 function setTags(deckIdx, cid, tags) {
   const clean = cleanTags(tags);
@@ -181,6 +186,17 @@ function setTags(deckIdx, cid, tags) {
   });
 }
 
+// ドロー系のカードのドロー枚数を決める（既定の枚数と同じなら指定を外す）
+function setDraw(deckIdx, cid, n) {
+  n = Math.max(1, Math.min(MAX_DRAW, Math.floor(Number(n)) || DEFAULT_DRAW));
+  mutate(() => {
+    const d = state.decks[deckIdx];
+    if (n === DEFAULT_DRAW) delete d.draws[cid];
+    else d.draws[cid] = n;
+  });
+}
+
+// デッキ間の移動はチームの合計枚数を変えないので、枠の種類と枚数上限だけ確認する
 function moveCard(cid, from, to, n = 1) {
   if (from.deck === to.deck && from.section === to.section) return;
   const card = cardInfo(cid);
@@ -246,7 +262,8 @@ function renderDecks() {
             const sel = selected && selected.cid === cid && selected.deck === i && selected.section === s;
             const url = imgUrl(c);
             const tags = d.tags[cid] || [];
-            const title = tags.length ? `${c.name}\nタグ: ${tags.join('、')}` : c.name;
+            const tagText = tags.map((t) => (t === DRAW_TAG ? `${t}（${drawOf(d, cid)}枚）` : t)).join('、');
+            const title = tags.length ? `${c.name}\nタグ: ${tagText}` : c.name;
             return `<div class="tile${sel ? ' selected' : ''}${bad.has(cid) ? ' over' : ''}" draggable="true" data-cid="${cid}" data-deck="${i}" data-section="${s}" title="${esc(title)}">
               ${url ? `<img src="${url}" alt="${esc(c.name)}" loading="lazy" draggable="false">` : `<span class="noimg">${esc(c.name)}</span>`}
               ${limitBadge(cid)}${tags.length ? `<span class="tagmark">${esc(tags[0])}${tags.length > 1 ? `+${tags.length - 1}` : ''}</span>` : ''}<span class="cnt">${count}</span></div>`;
@@ -353,6 +370,7 @@ function renderDetail() {
         ${tags.map((t) => `<span class="tag-chip">${esc(t)}<button type="button" data-untag="${esc(t)}" title="タグを外す">×</button></span>`).join('')}
         ${tags.length < MAX_TAGS ? `<input id="tagInput" list="tagOptions" maxlength="20" placeholder="タグを追加（Enter）"><datalist id="tagOptions">${known.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>` : ''}
       </div>
+      ${tags.includes(DRAW_TAG) ? `<div class="act-row tag-row"><label class="draw-count">ドロー枚数 <input id="drawCount" type="number" min="1" max="${MAX_DRAW}" value="${drawOf(deck, cid)}"> 枚</label><span class="muted">初手シミュレーションで、使ったときに追加で引く枚数</span></div>` : ''}
       ${known.length && tags.length < MAX_TAGS ? `<div class="act-row tag-row"><span class="muted">タグを選ぶ:</span>${known.map((t) => `<button type="button" class="tag-pick" data-addtag="${esc(t)}">＋${esc(t)}</button>`).join('')}</div>` : ''}`;
   }
   const stats = [c.attr, c.level, c.pscale && `スケール ${c.pscale}`, c.species, c.effect, c.atk, c.def].filter(Boolean).join(' / ');
@@ -800,7 +818,8 @@ function exportText() {
         parts.push(`＜${SECTION_LABEL[s]}デッキ ${sectionTotal(d[s])}枚＞`);
         for (const e of sortedList(d[s])) {
           const tags = d.tags[e.cid] || [];
-          parts.push(`${e.count} ${cardInfo(e.cid).name}${tags.length ? ` ［${tags.join('・')}］` : ''}`);
+          const tagText = tags.map((t) => (t === DRAW_TAG ? `${t}${drawOf(d, e.cid)}枚` : t)).join('・');
+          parts.push(`${e.count} ${cardInfo(e.cid).name}${tags.length ? ` ［${tagText}］` : ''}`);
         }
       }
       return parts.join('\n');
@@ -820,32 +839,121 @@ function openHandSim(deckIdx) {
   $('handDialog').showModal();
 }
 
+// 表の 1 行分の「割合」欄（棒グラフつき）
+function barCell(n, trials, pct) {
+  return `<td class="bar-cell"><span class="bar" style="width:${(n / trials) * 100}%"></span><span>${pct(n)}</span></td>`;
+}
+
+// ドロー系があるときの比較用の欄（ドローなしの初手 5 枚での値）
+function baseCell(show, n, pct) {
+  return show ? `<td class="num muted">${pct(n)}</td>` : '';
+}
+
 function renderHandSim() {
   const d = state.decks[handDeck];
-  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE, order: PRESET_TAGS });
+  const res = simulateHands(d.main, d.tags, {
+    trials: HAND_TRIALS,
+    hand: HAND_SIZE,
+    order: PRESET_TAGS,
+    draws: d.draws,
+    drawOncePerName: $('drawOncePerName').checked,
+  });
   const pct = (n) => `${((n / res.trials) * 100).toFixed(1)}%`;
+  const withDraw = !!res.draw;
+  $('drawOption').hidden = !withDraw;
   $('handTitle').textContent = `初手シミュレーション：デッキ${DECK_LABELS[handDeck]}「${d.name}」`;
   if (res.size < HAND_SIZE) {
     $('handInfo').textContent = `メインデッキが${res.size}枚しかないため、${HAND_SIZE}枚の初手を引けません。`;
     $('handResults').innerHTML = '';
     return;
   }
-  $('handInfo').textContent = `メインデッキ ${res.size}枚からランダムに ${HAND_SIZE}枚引く試行を ${res.trials.toLocaleString()}回行い、タグの付いたカードを何枚引いたかを数えました。`;
-  if (!res.results.length) {
+  $('handInfo').textContent =
+    `メインデッキ ${res.size}枚からランダムに ${HAND_SIZE}枚引く試行を ${res.trials.toLocaleString()}回行い、タグの付いたカードを何枚引いたかを数えました。` +
+    (withDraw ? '手札のドロー系は、指定した枚数だけ追加で引いたものとして計算し、「ドローなし」の欄に初手5枚だけの値を並べています（コストや発動条件は考えません）。' : '');
+  if (!res.drawn.results.length) {
     $('handResults').innerHTML = '<p>メインデッキのカードにタグが付いていません。デッキのカードをクリックし、詳細欄の「タグ」から付けてください。</p>';
     return;
   }
-  $('handResults').innerHTML = renderStartResult(res, pct) + renderPairResult(res, pct) + res.results
-    .map((r) => {
-      // そろった割合: 組み合わせ初動は 2 枚以上、ほかのタグは 1 枚以上
-      const enough = r.dist.slice(r.need).reduce((a, n) => a + n, 0);
+  const view = { res, pct, withDraw, deck: d };
+  $('handResults').innerHTML = renderDrawResult(view) + renderStartResult(view) + renderPairResult(view) + renderTagResults(view);
+}
+
+// ドロー系を使えた割合と、追加で引いた枚数
+function renderDrawResult({ res, pct, deck }) {
+  const r = res.draw;
+  if (!r) return '';
+  const cards = res.drawn.results.find((x) => x.tag === DRAW_TAG).cards;
+  const avg = (r.extra / res.trials).toFixed(2);
+  const avgUsed = r.used ? (r.extra / r.used).toFixed(2) : '0';
+  const rule = $('drawOncePerName').checked ? '同名のドロー系は1ターンに1枚だけ使うとして計算しています。' : '同名のドロー系も、引いた枚数すべてを使うとして計算しています。';
+  return `<section class="hand-tag hand-summary">
+      <h3>ドロー系を使えた <b>${pct(r.used)}</b></h3>
+      <p class="hand-cards">${cards.map((e) => `${esc(cardInfo(e.cid).name)}×${e.count}（${drawOf(deck, e.cid)}枚ドロー）`).join('、')}<br>
+        追加で引いた枚数の平均: ${avg}枚（ドロー系を使えた手札だけでは ${avgUsed}枚）。${rule}引いたカードにドロー系があれば、続けて使います。</p>
+    </section>`;
+}
+
+// 初動（初動 1 枚、または組み合わせ初動 2 枚）で動けた割合と、動けたうえでほかのタグもそろった割合
+function renderStartResult({ res, pct, withDraw }) {
+  const s = res.drawn.start;
+  if (!s) return '';
+  const b = res.base.start;
+  const tagged = (tag) => res.drawn.results.find((r) => r.tag === tag)?.copies || 0;
+  const notes = [`初動 ${tagged(START_TAG)}枚・組み合わせ初動 ${tagged(COMBO_TAG)}枚。初動 1枚以上、または組み合わせ初動 2枚以上（同名を含む）で動けるとして数えています。`];
+  if (s.sameNameOnly) notes.push(`組み合わせ初動で動けた手札のうち、引いた組み合わせ初動がすべて同名だったもの: ${pct(s.sameNameOnly)}`);
+  // 使っていない方の初動タグの行は出さない
+  const rows = [
+    ...(tagged(START_TAG) ? [['初動1枚以上で動ける', s.bySingle, b.bySingle]] : []),
+    ...(tagged(COMBO_TAG) ? [['初動がなく、組み合わせ初動2枚以上で動ける', s.byComboOnly, b.byComboOnly]] : []),
+    ...s.withTag.map((w, i) => [`動けて、さらに「${esc(w.tag)}」も1枚以上（初動に使ったカードとは別）`, w.count, b.withTag[i].count]),
+  ];
+  return `<section class="hand-tag hand-summary">
+      <h3>初動で動ける <b>${pct(s.count)}</b>${withDraw ? ` <small class="muted">ドローなし ${pct(b.count)}</small>` : ''}</h3>
+      <p class="hand-cards">${notes.join('<br>')}</p>
+      <table>
+        <thead><tr><th>手札</th><th>割合</th><th>回数</th>${withDraw ? '<th>ドローなし</th>' : ''}</tr></thead>
+        <tbody>${rows
+          .map(([label, n, nb]) => `<tr><td>${label}</td>${barCell(n, res.trials, pct)}<td class="num">${n.toLocaleString()}</td>${baseCell(withDraw, nb, pct)}</tr>`)
+          .join('')}</tbody>
+      </table>
+    </section>`;
+}
+
+// タグ 2 つを別々のカードでそろえた割合
+function renderPairResult({ res, pct, withDraw }) {
+  const pairs = res.drawn.pairs;
+  if (!pairs.length) return '';
+  return `<section class="hand-tag hand-summary">
+      <h3>タグの組み合わせ</h3>
+      <p class="hand-cards">2つのタグのカードを、別々のカードでそれぞれ引いた割合です。組み合わせ初動は2枚以上、ほかのタグは1枚以上でそろったとします（1枚で両方のタグを持つカードは、片方にしか数えません。ドロー系は組み合わせに含めません）。</p>
+      <table>
+        <thead><tr><th>組み合わせ</th><th>割合</th><th>回数</th>${withDraw ? '<th>ドローなし</th>' : ''}</tr></thead>
+        <tbody>${pairs
+          .map(
+            (p, i) =>
+              `<tr><td>「${esc(p.a)}」${needOf(p.a)}枚＋「${esc(p.b)}」${needOf(p.b)}枚</td>${barCell(p.count, res.trials, pct)}<td class="num">${p.count.toLocaleString()}</td>${baseCell(withDraw, res.base.pairs[i].count, pct)}</tr>`
+          )
+          .join('')}</tbody>
+      </table>
+    </section>`;
+}
+
+// タグごとに、引いた枚数の分布と同名カードの重複
+function renderTagResults({ res, pct, withDraw }) {
+  return res.drawn.results
+    .map((r, ri) => {
+      const base = res.base.results[ri];
+      const sum = (dist) => dist.slice(r.need).reduce((a, n) => a + n, 0); // そろった回数: 組み合わせ初動は 2 枚以上、ほかは 1 枚以上
       const multi = r.cards.some((e) => e.count >= 2);
+      // ドローで手札が増えると 6 枚以上もありうるので、実際に出た枚数まで表示する
+      let last = Math.min(HAND_SIZE, r.copies);
+      r.dist.forEach((n, k) => n && k > last && (last = k));
       const rows = r.dist
-        .slice(0, Math.min(HAND_SIZE, r.copies) + 1)
+        .slice(0, last + 1)
         .map((n, k) => {
           let dup = '—';
           if (k >= 2 && multi) dup = r.dup[k] ? `${pct(r.dup[k])}<small>（${k}枚のときの ${((r.dup[k] / n) * 100).toFixed(0)}%）</small>` : 'なし';
-          return `<tr><td>${k}枚</td><td class="bar-cell"><span class="bar" style="width:${(n / res.trials) * 100}%"></span><span>${pct(n)}</span></td><td class="num">${n.toLocaleString()}</td><td>${dup}</td></tr>`;
+          return `<tr><td>${k}枚</td>${barCell(n, res.trials, pct)}<td class="num">${n.toLocaleString()}</td><td>${dup}</td>${baseCell(withDraw, base.dist[k], pct)}</tr>`;
         })
         .join('');
       const dupCards = Object.entries(r.dupByCard)
@@ -857,53 +965,16 @@ function renderHandSim() {
           ? `同名カードを2枚以上引いた割合: ${dupCards.join('、')}`
           : '同名カードを2枚以上引いた試行はありませんでした。';
       return `<section class="hand-tag">
-          <h3>「${esc(r.tag)}」 <span class="muted">対象 ${r.copies}枚</span> <b>${r.need}枚以上: ${pct(enough)}</b></h3>
+          <h3>「${esc(r.tag)}」 <span class="muted">対象 ${r.copies}枚</span> <b>${r.need}枚以上: ${pct(sum(r.dist))}</b>${withDraw ? ` <small class="muted">ドローなし ${pct(sum(base.dist))}</small>` : ''}</h3>
           <p class="hand-cards">${r.cards.map((e) => `${esc(cardInfo(e.cid).name)}×${e.count}`).join('、')}</p>
           <table>
-            <thead><tr><th>引いた枚数</th><th>割合</th><th>回数</th><th>うち同名カードを含む</th></tr></thead>
+            <thead><tr><th>引いた枚数</th><th>割合</th><th>回数</th><th>うち同名カードを含む</th>${withDraw ? '<th>ドローなし</th>' : ''}</tr></thead>
             <tbody>${rows}</tbody>
           </table>
           <p class="dup-note">${dupNote}</p>
         </section>`;
     })
     .join('');
-}
-
-// 初動（初動 1 枚、または組み合わせ初動 2 枚）で動けた割合と、動けたうえでほかのタグもそろった割合
-function renderStartResult(res, pct) {
-  const s = res.start;
-  if (!s) return '';
-  const tagged = (tag) => res.results.find((r) => r.tag === tag)?.copies || 0;
-  const notes = [`初動 ${tagged(START_TAG)}枚・組み合わせ初動 ${tagged(COMBO_TAG)}枚。初動 1枚以上、または組み合わせ初動 2枚以上（同名を含む）で動けるとして数えています。`];
-  if (s.sameNameOnly) notes.push(`組み合わせ初動で動けた手札のうち、引いた組み合わせ初動がすべて同名だったもの: ${pct(s.sameNameOnly)}`);
-  const rows = [
-    ['初動1枚以上で動ける', s.bySingle],
-    ['初動がなく、組み合わせ初動2枚以上で動ける', s.byComboOnly],
-    ...s.withTag.map((w) => [`動けて、さらに「${esc(w.tag)}」も1枚以上（初動に使ったカードとは別）`, w.count]),
-  ];
-  return `<section class="hand-tag hand-summary">
-      <h3>初動で動ける <b>${pct(s.count)}</b></h3>
-      <p class="hand-cards">${notes.join('<br>')}</p>
-      <table>
-        <thead><tr><th>手札</th><th>割合</th><th>回数</th></tr></thead>
-        <tbody>${rows.map(([label, n]) => `<tr><td>${label}</td><td class="bar-cell"><span class="bar" style="width:${(n / res.trials) * 100}%"></span><span>${pct(n)}</span></td><td class="num">${n.toLocaleString()}</td></tr>`).join('')}</tbody>
-      </table>
-    </section>`;
-}
-
-// タグ 2 つを別々のカードでそろえた割合
-function renderPairResult(res, pct) {
-  if (!res.pairs.length) return '';
-  return `<section class="hand-tag hand-summary">
-      <h3>タグの組み合わせ</h3>
-      <p class="hand-cards">2つのタグのカードを、別々のカードでそれぞれ引いた割合です。組み合わせ初動は2枚以上、ほかのタグは1枚以上でそろったとします（1枚で両方のタグを持つカードは、片方にしか数えません）。</p>
-      <table>
-        <thead><tr><th>組み合わせ</th><th>割合</th><th>回数</th></tr></thead>
-        <tbody>${res.pairs
-          .map((p) => `<tr><td>「${esc(p.a)}」${needOf(p.a)}枚＋「${esc(p.b)}」${needOf(p.b)}枚</td><td class="bar-cell"><span class="bar" style="width:${(p.count / res.trials) * 100}%"></span><span>${pct(p.count)}</span></td><td class="num">${p.count.toLocaleString()}</td></tr>`)
-          .join('')}</tbody>
-      </table>
-    </section>`;
 }
 
 function openTeamDialog() {
@@ -944,6 +1015,7 @@ async function loadSave(file) {
         name: String(d.name || `デッキ${DECK_LABELS[i]}`),
         ...Object.fromEntries(SECTIONS.map((s) => [s, (d[s] || []).filter((e) => /^\d+$/.test(e.cid) && e.count > 0).map((e) => ({ cid: e.cid, count: Number(e.count) }))])),
         tags: cleanDeckTags(d.tags),
+        draws: cleanDeckDraws(d.draws),
       }));
     });
     toast('読み込みました');
@@ -1025,7 +1097,7 @@ function onRoomMessage(r, msg) {
     r.everJoined = true;
     r.seed = false;
     r.retry = 0;
-    state.decks = withTags(msg.decks);
+    state.decks = normalizeDecks(msg.decks);
     Object.assign(state.cards, msg.cards);
     const pending = r.pending;
     r.pending = [];
@@ -1261,12 +1333,21 @@ function bindEvents() {
     if (b.dataset.addtag !== undefined) return setTags(selected.deck, cid, [...tags, b.dataset.addtag]);
   });
   $('detail').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.id === 'drawCount') {
+      e.preventDefault();
+      e.target.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
     if (e.key !== 'Enter' || e.target.id !== 'tagInput' || e.isComposing || !selected || selected.deck == null) return;
     e.preventDefault();
     const tag = e.target.value.trim();
     if (!tag) return;
     setTags(selected.deck, selected.cid, [...(state.decks[selected.deck].tags[selected.cid] || []), tag]);
     $('tagInput')?.focus();
+  });
+  $('detail').addEventListener('change', (e) => {
+    if (e.target.id !== 'drawCount' || !selected || selected.deck == null) return;
+    setDraw(selected.deck, selected.cid, e.target.value);
   });
 
   // ドラッグ＆ドロップ
@@ -1312,6 +1393,7 @@ function bindEvents() {
   // ヘッダー
   $('teamStatus').addEventListener('click', openTeamDialog);
   $('rerunHands').addEventListener('click', renderHandSim);
+  $('drawOncePerName').addEventListener('change', renderHandSim);
   $('undoBtn').addEventListener('click', () => restore(undoStack, redoStack));
   $('redoBtn').addEventListener('click', () => restore(redoStack, undoStack));
   $('importBtn').addEventListener('click', () => openImport());

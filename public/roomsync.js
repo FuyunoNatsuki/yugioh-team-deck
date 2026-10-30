@@ -3,14 +3,17 @@
 //   { d, s, cid, count }  デッキ d の枠 s のカード cid を count 枚にする
 //   { d, name }           デッキ d の名前を name にする
 //   { d, cid, tags }      デッキ d のカード cid のタグを tags にする（空なら外す）
+//   { d, cid, draw }      デッキ d のカード cid のドロー枚数を draw にする（0 なら指定を外す）
 
 export const ROOM_SECTIONS = ['main', 'extra', 'side'];
 export const MAX_TAGS = 8;
 export const MAX_TAG_LENGTH = 20;
+export const MAX_DRAW = 10;
 
 export function opKey(op) {
   if ('name' in op) return `${op.d}:name`;
   if ('tags' in op) return `${op.d}:tags:${op.cid}`;
+  if ('draw' in op) return `${op.d}:draw:${op.cid}`;
   return `${op.d}:${op.s}:${op.cid}`;
 }
 
@@ -44,6 +47,11 @@ export function diffDecks(prev, next) {
       const tags = newTags[cid] || [];
       if (JSON.stringify(oldTags[cid] || []) !== JSON.stringify(tags)) ops.push({ d, cid, tags });
     }
+    const oldDraws = old.draws || {};
+    const newDraws = deck.draws || {};
+    for (const cid of new Set([...Object.keys(oldDraws), ...Object.keys(newDraws)])) {
+      if ((oldDraws[cid] || 0) !== (newDraws[cid] || 0)) ops.push({ d, cid, draw: newDraws[cid] || 0 });
+    }
   });
   return ops;
 }
@@ -60,6 +68,12 @@ export function applyOps(decks, ops) {
       deck.tags ||= {};
       if (op.tags.length) deck.tags[op.cid] = [...op.tags];
       else delete deck.tags[op.cid];
+      continue;
+    }
+    if ('draw' in op) {
+      deck.draws ||= {};
+      if (op.draw > 0) deck.draws[op.cid] = op.draw;
+      else delete deck.draws[op.cid];
       continue;
     }
     const list = deck[op.s];
@@ -79,9 +93,20 @@ export function validOps(ops) {
     if ('name' in op) return typeof op.name === 'string' ? [{ d: op.d, name: op.name.slice(0, 40) }] : [];
     if (!/^\d{1,8}$/.test(op.cid)) return [];
     if ('tags' in op) return Array.isArray(op.tags) ? [{ d: op.d, cid: op.cid, tags: cleanTags(op.tags) }] : [];
+    if ('draw' in op) return Number.isInteger(op.draw) && op.draw >= 0 && op.draw <= MAX_DRAW ? [{ d: op.d, cid: op.cid, draw: op.draw }] : [];
     if (!ROOM_SECTIONS.includes(op.s) || !Number.isInteger(op.count) || op.count < 0 || op.count > 60) return [];
     return [{ d: op.d, s: op.s, cid: op.cid, count: op.count }];
   });
+}
+
+// デッキのドロー枚数（cid → 枚数）を整える
+export function cleanDeckDraws(draws) {
+  const out = {};
+  if (!draws || typeof draws !== 'object') return out;
+  for (const [cid, n] of Object.entries(draws).slice(0, 200)) {
+    if (/^\d{1,8}$/.test(cid) && Number.isInteger(n) && n > 0 && n <= MAX_DRAW) out[cid] = n;
+  }
+  return out;
 }
 
 // デッキのタグ（cid → タグ一覧）を整える。保存データやルームの最初の内容を受け取るときに使う
