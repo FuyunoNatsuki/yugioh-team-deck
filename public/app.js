@@ -1,7 +1,7 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
-import { COMBO_TAG, START_TAG, simulateHands } from './handsim.js';
+import { COMBO_TAG, START_TAG, needOf, simulateHands } from './handsim.js';
 import { MAX_TAGS, applyOps, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
@@ -822,7 +822,7 @@ function openHandSim(deckIdx) {
 
 function renderHandSim() {
   const d = state.decks[handDeck];
-  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE, order: PRESET_TAGS, comboSameName: $('comboSameName').checked });
+  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE, order: PRESET_TAGS });
   const pct = (n) => `${((n / res.trials) * 100).toFixed(1)}%`;
   $('handTitle').textContent = `初手シミュレーション：デッキ${DECK_LABELS[handDeck]}「${d.name}」`;
   if (res.size < HAND_SIZE) {
@@ -837,7 +837,8 @@ function renderHandSim() {
   }
   $('handResults').innerHTML = renderStartResult(res, pct) + renderPairResult(res, pct) + res.results
     .map((r) => {
-      const atLeastOne = res.trials - r.dist[0];
+      // そろった割合: 組み合わせ初動は 2 枚以上、ほかのタグは 1 枚以上
+      const enough = r.dist.slice(r.need).reduce((a, n) => a + n, 0);
       const multi = r.cards.some((e) => e.count >= 2);
       const rows = r.dist
         .slice(0, Math.min(HAND_SIZE, r.copies) + 1)
@@ -856,7 +857,7 @@ function renderHandSim() {
           ? `同名カードを2枚以上引いた割合: ${dupCards.join('、')}`
           : '同名カードを2枚以上引いた試行はありませんでした。';
       return `<section class="hand-tag">
-          <h3>「${esc(r.tag)}」 <span class="muted">対象 ${r.copies}枚</span> <b>1枚以上: ${pct(atLeastOne)}</b></h3>
+          <h3>「${esc(r.tag)}」 <span class="muted">対象 ${r.copies}枚</span> <b>${r.need}枚以上: ${pct(enough)}</b></h3>
           <p class="hand-cards">${r.cards.map((e) => `${esc(cardInfo(e.cid).name)}×${e.count}`).join('、')}</p>
           <table>
             <thead><tr><th>引いた枚数</th><th>割合</th><th>回数</th><th>うち同名カードを含む</th></tr></thead>
@@ -873,13 +874,11 @@ function renderStartResult(res, pct) {
   const s = res.start;
   if (!s) return '';
   const tagged = (tag) => res.results.find((r) => r.tag === tag)?.copies || 0;
-  const rule = s.comboSameName ? '同名の2枚でも成立' : '別名の2枚が必要';
-  const notes = [`初動 ${tagged(START_TAG)}枚・組み合わせ初動 ${tagged(COMBO_TAG)}枚（組み合わせ初動は${rule}）`];
-  if (!s.comboSameName && s.sameNameOnly) notes.push(`組み合わせ初動が同名の2枚しかなく動けなかった手札: ${pct(s.sameNameOnly)}（同名でも組み合わせられるなら、下のチェックで成立に数えられます）`);
-  if (s.comboSameName && s.sameNameOnly) notes.push(`このうち、組み合わせ初動が同名の2枚だけで成立した手札: ${pct(s.sameNameOnly)}`);
+  const notes = [`初動 ${tagged(START_TAG)}枚・組み合わせ初動 ${tagged(COMBO_TAG)}枚。初動 1枚以上、または組み合わせ初動 2枚以上（同名を含む）で動けるとして数えています。`];
+  if (s.sameNameOnly) notes.push(`組み合わせ初動で動けた手札のうち、引いた組み合わせ初動がすべて同名だったもの: ${pct(s.sameNameOnly)}`);
   const rows = [
     ['初動1枚以上で動ける', s.bySingle],
-    ['初動がなく、組み合わせ初動2枚で動ける', s.byComboOnly],
+    ['初動がなく、組み合わせ初動2枚以上で動ける', s.byComboOnly],
     ...s.withTag.map((w) => [`動けて、さらに「${esc(w.tag)}」も1枚以上（初動に使ったカードとは別）`, w.count]),
   ];
   return `<section class="hand-tag hand-summary">
@@ -897,11 +896,11 @@ function renderPairResult(res, pct) {
   if (!res.pairs.length) return '';
   return `<section class="hand-tag hand-summary">
       <h3>タグの組み合わせ</h3>
-      <p class="hand-cards">2つのタグのカードを、別々のカードでそれぞれ1枚以上引いた割合です（1枚で両方のタグを持つカードは、片方にしか数えません）。</p>
+      <p class="hand-cards">2つのタグのカードを、別々のカードでそれぞれ引いた割合です。組み合わせ初動は2枚以上、ほかのタグは1枚以上でそろったとします（1枚で両方のタグを持つカードは、片方にしか数えません）。</p>
       <table>
         <thead><tr><th>組み合わせ</th><th>割合</th><th>回数</th></tr></thead>
         <tbody>${res.pairs
-          .map((p) => `<tr><td>「${esc(p.a)}」＋「${esc(p.b)}」</td><td class="bar-cell"><span class="bar" style="width:${(p.count / res.trials) * 100}%"></span><span>${pct(p.count)}</span></td><td class="num">${p.count.toLocaleString()}</td></tr>`)
+          .map((p) => `<tr><td>「${esc(p.a)}」${needOf(p.a)}枚＋「${esc(p.b)}」${needOf(p.b)}枚</td><td class="bar-cell"><span class="bar" style="width:${(p.count / res.trials) * 100}%"></span><span>${pct(p.count)}</span></td><td class="num">${p.count.toLocaleString()}</td></tr>`)
           .join('')}</tbody>
       </table>
     </section>`;
@@ -1313,7 +1312,6 @@ function bindEvents() {
   // ヘッダー
   $('teamStatus').addEventListener('click', openTeamDialog);
   $('rerunHands').addEventListener('click', renderHandSim);
-  $('comboSameName').addEventListener('change', renderHandSim);
   $('undoBtn').addEventListener('click', () => restore(undoStack, redoStack));
   $('redoBtn').addEventListener('click', () => restore(redoStack, undoStack));
   $('importBtn').addEventListener('click', () => openImport());
