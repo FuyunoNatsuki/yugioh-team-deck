@@ -11,8 +11,10 @@
     <h1>チーム戦デッキビルダー</h1>
     <span id="regulation" class="muted">禁止・制限リストを読み込み中…</span>
     <button id="teamStatus" class="status" type="button"></button>
+    <button id="roomStatus" class="status room" type="button" hidden></button>
     <div class="spacer"></div>
     <div class="actions">
+      <button id="roomBtn" type="button" title="URL を共有して 3 デッキを同時に編集する">ルーム</button>
       <button id="undoBtn" type="button" title="元に戻す (Ctrl+Z)">↶</button>
       <button id="redoBtn" type="button" title="やり直す (Ctrl+Y)">↷</button>
       <button id="importBtn" type="button" class="primary">ニューロンからインポート</button>
@@ -141,6 +143,34 @@
         <button type="button" id="backToStep1">画像を選び直す</button>
         <button type="button" data-close>キャンセル</button>
         <button id="registerImage" type="button" class="primary">登録</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="roomDialog">
+    <h2>ルーム（同時編集）</h2>
+    <div id="roomOut">
+      <p class="muted">ルームを作ると、URL を共有したメンバーと 3 つのデッキを同時に編集できます。今の 3 デッキがルームの最初の内容になります。</p>
+      <div class="dialog-actions start"><button id="createRoom" type="button" class="primary">ルームを作成</button></div>
+      <label>ルームに参加（共有された URL かルーム ID）
+        <input id="joinRoomInput" type="text" placeholder="https://…?room=xxxxxxxxxxxx" autocomplete="off">
+      </label>
+      <p class="muted">参加中はルームのデッキを表示します。手元のデッキは消えず、ルームを出ると元に戻せます。</p>
+      <div class="dialog-actions">
+        <button type="button" data-close>閉じる</button>
+        <button id="joinRoom" type="button" class="primary">参加</button>
+      </div>
+    </div>
+    <div id="roomIn" hidden>
+      <p id="roomInfo"></p>
+      <label>共有 URL（これを送ったメンバーが同じデッキを編集できます）
+        <input id="roomShareUrl" type="text" readonly>
+      </label>
+      <div class="dialog-actions">
+        <button id="leaveRoom" type="button">ルームを出る</button>
+        <div class="spacer"></div>
+        <button id="copyRoomUrl" type="button" class="primary">URL をコピー</button>
+        <button type="button" data-close>閉じる</button>
       </div>
     </div>
   </dialog>

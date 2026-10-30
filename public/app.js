@@ -1,6 +1,7 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
+import { applyOps, diffDecks, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
 const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サイド' };
@@ -61,6 +62,7 @@ const searchCards = {}; // 検索で見つけたカードの情報（デッキ�
 let search = { page: 1, total: 0, rp: 50, cards: [], params: null };
 const undoStack = [];
 const redoStack = [];
+let room = null; // 参加中のルーム（同時編集）。下の「ルーム」を参照
 
 // 起動時に、デッキで使っていないカードの情報を捨てる（編集中は「元に戻す」のため残す）
 function pruneCards() {
@@ -68,7 +70,9 @@ function pruneCards() {
   for (const cid of Object.keys(state.cards)) if (!used.has(cid)) delete state.cards[cid];
 }
 
+// ルームに参加している間は、手元のデッキ（ブラウザの保存）を上書きしない
 function save() {
+  if (room) return;
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
   } catch {}
@@ -82,14 +86,17 @@ function mutate(fn) {
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
   save();
+  sendRoomOps(diffDecks(JSON.parse(before), state.decks));
   render();
 }
 
 function restore(from, to) {
   if (!from.length) return;
+  const before = state.decks;
   to.push(JSON.stringify(state.decks));
   state.decks = JSON.parse(from.pop());
   save();
+  sendRoomOps(diffDecks(before, state.decks));
   render();
 }
 
@@ -187,11 +194,12 @@ function limitBadge(cid) {
   return lim < 3 ? `<span class="lim lim${lim}" title="${LIMIT_NAME[lim]}">${LIMIT_MARK[lim]}</span>` : '';
 }
 
+// 種類（モンスター・魔法・罠）ごとに読み順で並べる。ルームで同時に追加しても全員が同じ並びになる
 function sortedList(list) {
   return [...list].sort((a, b) => {
     const ca = cardInfo(a.cid);
     const cb = cardInfo(b.cid);
-    return (KIND_ORDER[ca.kind] ?? 0) - (KIND_ORDER[cb.kind] ?? 0);
+    return (KIND_ORDER[ca.kind] ?? 0) - (KIND_ORDER[cb.kind] ?? 0) || (ca.ruby || ca.name).localeCompare(cb.ruby || cb.name, 'ja');
   });
 }
 
@@ -812,6 +820,215 @@ async function loadSave(file) {
 
 // ---- イベント ----
 
+// ---- ルーム（同時編集） ----
+// 変更は「デッキ・枠・カードごとの枚数」単位で送り、サーバーが決めた順番で全員に配られる。
+// 自分が送ってまだ返ってきていない変更（inflight）がある項目は、ほかの人の変更を当てずに待つ
+// （サーバーでは自分の変更が後に当たるので、最後は全員同じ内容になる）。
+
+const ROOM_ID = /^[a-z0-9]{12}$/;
+const clientId = Math.random().toString(36).slice(2, 12);
+
+function newRoomId() {
+  const chars = 'abcdefghijkmnpqrstuvwxyz23456789';
+  return [...crypto.getRandomValues(new Uint8Array(12))].map((b) => chars[b % chars.length]).join('');
+}
+
+function roomShareUrl(id) {
+  const url = new URL(location.pathname, location.origin);
+  url.searchParams.set('room', id);
+  return url.toString();
+}
+
+function usedCards() {
+  const cards = {};
+  for (const d of state.decks) for (const s of SECTIONS) for (const e of d[s]) if (state.cards[e.cid]) cards[e.cid] = state.cards[e.cid];
+  return cards;
+}
+
+// seed が true なら今のデッキでルームを作る（すでにあればそのルームに参加する）
+function enterRoom(id, seed) {
+  if (room) leaveRoom(false);
+  room = { id, ws: null, joined: false, everJoined: false, seed, pending: [], unacked: new Map(), inflight: new Map(), peers: 0, retry: 0, timer: 0 };
+  history.replaceState(null, '', roomShareUrl(id));
+  connectRoom(room);
+  renderRoom();
+}
+
+function connectRoom(r) {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/room/${r.id}`);
+  r.ws = ws;
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'hello', seed: r.seed ? { decks: state.decks, cards: usedCards() } : undefined }));
+  };
+  ws.onmessage = (e) => {
+    if (room !== r) return;
+    try {
+      onRoomMessage(r, JSON.parse(e.data));
+    } catch {}
+  };
+  ws.onclose = (e) => {
+    if (room !== r) return;
+    // 届いたか分からない変更は、つなぎ直したあとに送り直す（同じ変更を 2 回当てても結果は同じ）
+    r.pending = [...[...r.unacked.values()].flat(), ...r.pending];
+    r.unacked.clear();
+    r.inflight.clear();
+    r.joined = false;
+    if (e.code === 4004) return;
+    if (!r.everJoined && r.retry >= 2) {
+      toast('ルームに接続できませんでした（ルーム機能は公開版でのみ使えます）', 'error');
+      leaveRoom(false);
+      return;
+    }
+    r.timer = setTimeout(() => room === r && connectRoom(r), Math.min(30000, 1000 * 2 ** r.retry++));
+    renderRoom();
+  };
+}
+
+function onRoomMessage(r, msg) {
+  if (msg.type === 'init') {
+    const first = !r.everJoined;
+    r.joined = true;
+    r.everJoined = true;
+    r.seed = false;
+    r.retry = 0;
+    state.decks = msg.decks;
+    Object.assign(state.cards, msg.cards);
+    const pending = r.pending;
+    r.pending = [];
+    applyOps(state.decks, pending);
+    undoStack.length = 0;
+    redoStack.length = 0;
+    sendRoomOps(pending);
+    render();
+    renderRoom();
+    if (first) toast('ルームに参加しました');
+  } else if (msg.type === 'ops') {
+    Object.assign(state.cards, msg.cards || {});
+    if (msg.from === clientId && r.unacked.has(msg.id)) {
+      // 自分の変更が返ってきた。手元にはもう当ててある
+      for (const op of r.unacked.get(msg.id)) {
+        const key = opKey(op);
+        const n = (r.inflight.get(key) || 1) - 1;
+        if (n) r.inflight.set(key, n);
+        else r.inflight.delete(key);
+      }
+      r.unacked.delete(msg.id);
+      return;
+    }
+    const ops = msg.ops.filter((op) => !r.inflight.has(opKey(op)));
+    if (!ops.length) return;
+    applyOps(state.decks, ops);
+    // ほかの人の変更をまたいで「元に戻す」と、その変更まで消してしまうので履歴を捨てる
+    undoStack.length = 0;
+    redoStack.length = 0;
+    render();
+  } else if (msg.type === 'peers') {
+    r.peers = msg.count;
+    renderRoom();
+  } else if (msg.type === 'error') {
+    toast(msg.message, 'error');
+    if (msg.code === 'notfound') leaveRoom(false);
+  }
+}
+
+function sendRoomOps(ops) {
+  if (!room || !ops.length) return;
+  if (!room.joined || room.ws?.readyState !== WebSocket.OPEN) {
+    room.pending.push(...ops);
+    renderRoom();
+    return;
+  }
+  const id = Math.random().toString(36).slice(2, 12);
+  const cards = {};
+  for (const op of ops) if (op.count > 0 && state.cards[op.cid]) cards[op.cid] = state.cards[op.cid];
+  room.unacked.set(id, ops);
+  for (const op of ops) room.inflight.set(opKey(op), (room.inflight.get(opKey(op)) || 0) + 1);
+  room.ws.send(JSON.stringify({ type: 'ops', id, from: clientId, ops, cards }));
+}
+
+// keepAsk が true なら、ルームのデッキを手元に残すか聞く
+function leaveRoom(keepAsk = true) {
+  const r = room;
+  if (!r) return;
+  room = null;
+  clearTimeout(r.timer);
+  try {
+    r.ws?.close(1000);
+  } catch {}
+  const keep = keepAsk && r.everJoined && confirm('ルームのデッキを手元のデッキとして残しますか？\n「キャンセル」で、ルームに入る前の手元のデッキに戻します。');
+  if (keep) {
+    save();
+  } else {
+    const local = loadState();
+    state.decks = local.decks;
+    Object.assign(state.cards, local.cards);
+  }
+  undoStack.length = 0;
+  redoStack.length = 0;
+  history.replaceState(null, '', location.pathname);
+  render();
+  renderRoom();
+}
+
+function renderRoom() {
+  const chip = $('roomStatus');
+  chip.hidden = !room;
+  $('roomOut').hidden = !!room;
+  $('roomIn').hidden = !room;
+  if (!room) return;
+  const online = room.joined;
+  chip.classList.toggle('offline', !online);
+  const waiting = room.pending.length ? `・未送信 ${room.pending.length}件` : '';
+  chip.textContent = online ? `ルーム参加中（${room.peers}人）` : `${room.everJoined ? '再接続中' : '接続中'}…${waiting}`;
+  chip.title = 'ルームの共有 URL を表示';
+  $('roomShareUrl').value = roomShareUrl(room.id);
+  $('roomInfo').textContent = online
+    ? `ルーム ${room.id} に参加中です。いま ${room.peers} 人がつながっています。`
+    : `ルーム ${room.id} に${room.everJoined ? 'つなぎ直しています' : '接続しています'}…${waiting}`;
+}
+
+function bindRoomEvents() {
+  const open = () => {
+    renderRoom();
+    $('roomDialog').showModal();
+  };
+  $('roomBtn').addEventListener('click', open);
+  $('roomStatus').addEventListener('click', open);
+  $('roomDialog').addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]')) $('roomDialog').close();
+  });
+  $('createRoom').addEventListener('click', () => {
+    enterRoom(newRoomId(), true);
+    renderRoom();
+    $('roomShareUrl').select();
+  });
+  const join = () => {
+    const text = $('joinRoomInput').value.trim();
+    let id = text;
+    try {
+      id = new URL(text).searchParams.get('room') || '';
+    } catch {}
+    if (!ROOM_ID.test(id)) return toast('ルームの URL か ID（英数字 12 文字）を入力してください', 'error');
+    $('joinRoomInput').value = '';
+    enterRoom(id, false);
+    $('roomDialog').close();
+  };
+  $('joinRoom').addEventListener('click', join);
+  $('joinRoomInput').addEventListener('keydown', (e) => e.key === 'Enter' && join());
+  $('copyRoomUrl').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('roomShareUrl').value);
+      toast('共有 URL をコピーしました');
+    } catch {
+      $('roomShareUrl').select();
+    }
+  });
+  $('leaveRoom').addEventListener('click', () => {
+    $('roomDialog').close();
+    leaveRoom();
+  });
+}
+
 // 再描画すると入力中のデッキ名からフォーカスが外れるので、クラスだけ切り替える
 function setActive(i) {
   if (state.active === i) return;
@@ -1005,5 +1222,8 @@ pruneCards();
 renderFilters();
 bindEvents();
 bindImageEvents();
+bindRoomEvents();
 render();
 loadLimits();
+const sharedRoom = new URLSearchParams(location.search).get('room');
+if (ROOM_ID.test(sharedRoom || '')) enterRoom(sharedRoom, false);

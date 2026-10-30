@@ -25,6 +25,7 @@ export async function handleApi(request) {
       case '/api/img':
         return await fetchImage(url.searchParams);
       default:
+        if (url.pathname.startsWith('/api/room/')) return json({ error: 'ルーム機能は Cloudflare Workers 版でのみ使えます' }, 501);
         return json({ error: 'not found' }, 404);
     }
   } catch (e) {

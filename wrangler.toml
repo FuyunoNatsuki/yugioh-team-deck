@@ -6,3 +6,12 @@ compatibility_date = "2025-09-01"
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/api/*"]
+
+# ルーム（同時編集）。ルームごとに 1 つの Durable Object が内容を持つ
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "DeckRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeckRoom"]
