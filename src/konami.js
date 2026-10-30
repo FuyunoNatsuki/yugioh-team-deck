@@ -170,13 +170,26 @@ export function fetchLimits() {
   });
 }
 
-// ニューロンで公開・共有されたデッキの URL（member_deck.action?cgid=...&dno=...）から読み込む
+// ニューロンのデッキコード（例: 1sgb47h）から、そのデッキのページを公開デッキ検索で探して読み込む
+function fetchDeckByCode(code) {
+  return cached('deckcode:' + code, 5 * 60 * 1000, async () => {
+    const q = new URLSearchParams({ ope: '1', sess: '1', rp: '10', deck_code: code, request_locale: 'ja' });
+    const html = await getHtml('/deck_search.action?' + q);
+    const m = html.match(/cgid=([0-9a-f]{32})&(?:amp;)?dno=(\d+)/);
+    if (!m) throw new HttpError(404, `デッキコード「${code}」のデッキが見つかりません。コードが正しいか、デッキが公開されているか確認してください`);
+    return fetchDeck(`https://www.db.yugioh-card.com/yugiohdb/member_deck.action?cgid=${m[1]}&dno=${m[2]}`);
+  });
+}
+
+// ニューロンで公開・共有されたデッキの URL（member_deck.action?cgid=...&dno=...）かデッキコードから読み込む
 export function fetchDeck(input) {
+  const text = String(input).trim();
+  if (/^[0-9a-z]{4,20}$/i.test(text)) return fetchDeckByCode(text.toLowerCase());
   let url;
   try {
-    url = new URL(String(input).trim());
+    url = new URL(text);
   } catch {
-    throw new HttpError(400, 'デッキの URL を入力してください');
+    throw new HttpError(400, 'デッキの URL かデッキコードを入力してください');
   }
   const cgid = url.searchParams.get('cgid') || '';
   const dno = url.searchParams.get('dno') || '';

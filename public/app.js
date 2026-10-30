@@ -9,7 +9,14 @@ const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サ�
 const SECTION_MAX = { main: 60, extra: 15, side: 15 };
 const DECK_LABELS = ['A', 'B', 'C'];
 const KIND_ORDER = { monster: 0, spell: 1, trap: 2 };
-const LIMIT_MARK = { 0: '禁', 1: '制', 2: '準' };
+// 禁止・制限・準制限のマーク。公式のカードデータベースと同じく、禁止は斜線の丸、制限はカード 1 枚、準制限はカード 2 枚
+const cardGlyph = (x) => `M${x} 2.5h7.4v11h-7.4z M${x + 1.2} 3.7h5v5.6h-5z`; // 上に絵の窓が抜けたカードの形
+const LIMIT_MARK = {
+  0: '<circle cx="12" cy="8" r="5.3" fill="none" stroke="#fff" stroke-width="1.3"/><path d="M8.25 4.25l7.5 7.5" stroke="#fff" stroke-width="1.3"/>',
+  1: `<path fill="#fff" fill-rule="evenodd" d="${cardGlyph(8.3)}"/>`,
+  2: `<path fill="#fff" fill-rule="evenodd" d="${cardGlyph(4.1)} ${cardGlyph(12.5)}"/>`,
+};
+const limitIcon = (lim) => `<svg viewBox="0 0 24 16" aria-hidden="true">${LIMIT_MARK[lim]}</svg>`;
 const LIMIT_NAME = { 0: '禁止', 1: '制限', 2: '準制限' };
 const STORE_KEY = 'ygoTeamDeck.v1';
 // 最初から選べるタグ。初手シミュレーションでは、初動と組み合わせ初動で「動けるか」を計算し、
@@ -227,7 +234,7 @@ function imgUrl(card) {
 
 function limitBadge(cid) {
   const lim = limitOf(cid);
-  return lim < 3 ? `<span class="lim lim${lim}" title="${LIMIT_NAME[lim]}">${LIMIT_MARK[lim]}</span>` : '';
+  return lim < 3 ? `<span class="lim lim${lim}" title="${LIMIT_NAME[lim]}" role="img" aria-label="${LIMIT_NAME[lim]}">${limitIcon(lim)}</span>` : '';
 }
 
 // 種類（モンスター・魔法・罠）ごとに読み順で並べる。ルームで同時に追加しても全員が同じ並びになる
@@ -987,7 +994,7 @@ function openTeamDialog() {
     rows
       .map(({ cid, used, lim }) => {
         const per = state.decks.map((d) => SECTIONS.reduce((n, s) => n + countIn(d[s], cid), 0) || '');
-        return `<tr class="${used > lim ? 'over' : used === lim ? 'full' : ''}"><td>${esc(cardInfo(cid).name)}</td><td>${lim < 3 ? LIMIT_NAME[lim] : ''}</td>${per
+        return `<tr class="${used > lim ? 'over' : used === lim ? 'full' : ''}"><td>${esc(cardInfo(cid).name)}</td><td>${lim < 3 ? `<span class="lim-inline">${limitBadge(cid)}${LIMIT_NAME[lim]}</span>` : ''}</td>${per
           .map((n) => `<td class="num">${n}</td>`)
           .join('')}<td class="num">${used}/${lim}</td></tr>`;
       })

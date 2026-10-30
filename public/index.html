@@ -17,7 +17,7 @@
       <button id="roomBtn" type="button" title="URL を共有して 3 デッキを同時に編集する">ルーム</button>
       <button id="undoBtn" type="button" title="元に戻す (Ctrl+Z)">↶</button>
       <button id="redoBtn" type="button" title="やり直す (Ctrl+Y)">↷</button>
-      <button id="importBtn" type="button" class="primary">ニューロンからインポート</button>
+      <button id="importBtn" type="button" class="primary" title="デッキコードかデッキの URL から読み込む">ニューロンからインポート</button>
       <button id="imageBtn" type="button" class="primary">画像から登録</button>
       <button id="exportBtn" type="button">テキスト出力</button>
       <button id="saveBtn" type="button" title="3デッキをファイルに保存">保存</button>
@@ -98,8 +98,8 @@
   <dialog id="importDialog">
     <form method="dialog" id="importForm">
       <h2>遊戯王ニューロンからインポート</h2>
-      <p class="muted">ニューロンのデッキ画面で「公開」にしたデッキの URL（<code>member_deck.action?…cgid=…&amp;dno=…</code>）を貼り付けてください。</p>
-      <label>デッキURL<input id="importUrl" type="url" required placeholder="https://www.db.yugioh-card.com/yugiohdb/member_deck.action?..."></label>
+      <p class="muted">ニューロンで発行した<b>デッキコード</b>（例: <code>1sgb47h</code>）か、「公開」にしたデッキの URL（<code>member_deck.action?…cgid=…&amp;dno=…</code>）を入力してください。</p>
+      <label>デッキコード または デッキURL<input id="importUrl" type="text" required autocomplete="off" placeholder="1sgb47h ／ https://www.db.yugioh-card.com/yugiohdb/member_deck.action?..."></label>
       <label>読み込み先
         <select id="importTarget"></select>
       </label>
