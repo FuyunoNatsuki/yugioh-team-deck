@@ -3,12 +3,12 @@
 //
 // やりとり（WebSocket、JSON）:
 //   ブラウザ → { type: 'hello', seed? }        参加。seed（{ decks, cards }）付きなら、ルームがまだなければそれで作る
-//   ブラウザ → { type: 'ops', id, from, ops, cards }  変更
+//   ブラウザ → { type: 'ops', id, from, ops, cards }  変更（op の形は public/roomsync.js）
 //   サーバー → { type: 'init', decks, cards }   参加したときの今の内容
 //   サーバー → { type: 'ops', id, from, ops, cards }  受け付けた変更（送った本人にも返す）
 //   サーバー → { type: 'peers', count }         つながっている人数
 //   サーバー → { type: 'error', code, message }
-import { ROOM_SECTIONS, applyOps, validOps } from '../public/roomsync.js';
+import { ROOM_SECTIONS, applyOps, cleanDeckTags, validOps } from '../public/roomsync.js';
 
 const MAX_MESSAGE = 512 * 1024;
 const IDLE_MS = 30 * 24 * 60 * 60 * 1000; // 最後の変更からこの期間たったルームは消す
@@ -37,6 +37,7 @@ function cleanDecks(decks) {
         .slice(0, 100)
         .map((e) => ({ cid: e.cid, count: e.count }));
     }
+    deck.tags = cleanDeckTags(d?.tags);
     return deck;
   });
 }

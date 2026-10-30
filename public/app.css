@@ -256,6 +256,51 @@ input[type="search"], input[type="url"], input:not([type]), select, textarea {
 .lim2 { background: #f9a825; color: #222; }
 .hint { margin: 0; padding: 0 12px 8px; font-size: 12px; color: var(--muted); }
 
+/* タグ */
+.tagmark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  padding: 0 2px;
+  background: color-mix(in srgb, var(--accent) 88%, transparent);
+  color: var(--accent-text);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tag-row { font-size: 12px; }
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.tag-chip button { border: 0; background: none; color: inherit; padding: 0 5px; font-size: 12px; }
+.tag-row input { width: 140px; font-size: 12px; padding: 2px 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.tag-pick { font-size: 11px; padding: 1px 6px; }
+
+/* 初手シミュレーション */
+#handDialog { width: min(760px, calc(100vw - 32px)); }
+.hand-results { max-height: 62vh; overflow: auto; }
+.hand-tag { border-top: 1px solid var(--line); padding: 8px 0; }
+.hand-tag h3 { margin: 0; font-size: 15px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.hand-tag h3 b { color: var(--accent); }
+.hand-cards { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+.hand-tag table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.hand-tag th, .hand-tag td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; }
+.hand-tag td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.bar-cell { position: relative; width: 38%; }
+.bar-cell .bar { position: absolute; left: 0; top: 3px; bottom: 3px; background: color-mix(in srgb, var(--accent) 22%, transparent); border-radius: 2px; }
+.bar-cell span:last-child { position: relative; font-variant-numeric: tabular-nums; }
+.dup-note { margin: 4px 0 0; font-size: 12px; }
+
 /* ダイアログ */
 dialog {
   border: 1px solid var(--line);

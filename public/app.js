@@ -1,7 +1,8 @@
 // チーム戦デッキビルダー
 // 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
-import { applyOps, diffDecks, opKey } from './roomsync.js';
+import { simulateHands } from './handsim.js';
+import { MAX_TAGS, applyOps, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
 const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サイド' };
@@ -43,14 +44,21 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 // ---- 状態 ----
 
+// tags はデッキごとのカードのタグ（cid → タグの一覧）
 function newDeck(label) {
-  return { name: `デッキ${label}`, main: [], extra: [], side: [] };
+  return { name: `デッキ${label}`, main: [], extra: [], side: [], tags: {} };
+}
+
+// タグ機能より前に保存したデッキにも tags を足す
+function withTags(decks) {
+  for (const d of decks) d.tags = cleanDeckTags(d.tags);
+  return decks;
 }
 
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.decks) && s.decks.length === 3) return { active: 0, cards: {}, ...s };
+    if (s && Array.isArray(s.decks) && s.decks.length === 3) return { active: 0, cards: {}, ...s, decks: withTags(s.decks) };
   } catch {}
   return { decks: DECK_LABELS.map(newDeck), cards: {}, active: 0 };
 }
@@ -161,6 +169,16 @@ function removeCard(cid, deckIdx, section, n = 1) {
 }
 
 // デッキ間の移動はチームの合計枚数を変えないので、枠の種類と枚数上限だけ確認する
+// デッキのカードのタグを付け直す（空ならタグを外す）
+function setTags(deckIdx, cid, tags) {
+  const clean = cleanTags(tags);
+  mutate(() => {
+    const d = state.decks[deckIdx];
+    if (clean.length) d.tags[cid] = clean;
+    else delete d.tags[cid];
+  });
+}
+
 function moveCard(cid, from, to, n = 1) {
   if (from.deck === to.deck && from.section === to.section) return;
   const card = cardInfo(cid);
@@ -225,9 +243,11 @@ function renderDecks() {
             const c = cardInfo(cid);
             const sel = selected && selected.cid === cid && selected.deck === i && selected.section === s;
             const url = imgUrl(c);
-            return `<div class="tile${sel ? ' selected' : ''}${bad.has(cid) ? ' over' : ''}" draggable="true" data-cid="${cid}" data-deck="${i}" data-section="${s}" title="${esc(c.name)}">
+            const tags = d.tags[cid] || [];
+            const title = tags.length ? `${c.name}\nタグ: ${tags.join('、')}` : c.name;
+            return `<div class="tile${sel ? ' selected' : ''}${bad.has(cid) ? ' over' : ''}" draggable="true" data-cid="${cid}" data-deck="${i}" data-section="${s}" title="${esc(title)}">
               ${url ? `<img src="${url}" alt="${esc(c.name)}" loading="lazy" draggable="false">` : `<span class="noimg">${esc(c.name)}</span>`}
-              ${limitBadge(cid)}<span class="cnt">${count}</span></div>`;
+              ${limitBadge(cid)}${tags.length ? `<span class="tagmark">${esc(tags[0])}${tags.length > 1 ? `+${tags.length - 1}` : ''}</span>` : ''}<span class="cnt">${count}</span></div>`;
           })
           .join('');
         const extraInfo = s === 'main' ? ` <small>${kindBreakdown(d[s])}</small>` : '';
@@ -240,6 +260,7 @@ function renderDecks() {
           <div class="deck-head">
             <span class="deck-label">${DECK_LABELS[i]}</span>
             <input class="deck-name" data-deck="${i}" value="${esc(d.name)}" aria-label="デッキ${DECK_LABELS[i]}の名前">
+            <button type="button" data-act="hands" data-deck="${i}" title="初手 5 枚にタグの付いたカードが何枚来るかを 1 万回試す">初手</button>
             <button type="button" data-act="import" data-deck="${i}" title="ニューロンから読み込む">取込</button>
             <button type="button" data-act="clear" data-deck="${i}">クリア</button>
           </div>
@@ -317,11 +338,20 @@ function renderDetail() {
         targets.push(`<button type="button" data-move="${i}" data-msec="${s}">${DECK_LABELS[i]}・${SECTION_LABEL[s]}へ</button>`);
       }
     });
+    const deck = state.decks[selected.deck];
+    const tags = deck.tags[cid] || [];
+    const known = [...new Set(state.decks.flatMap((d) => Object.values(d.tags).flat()))].filter((t) => !tags.includes(t));
     actions = `<div class="act-row">
         <span>デッキ${DECK_LABELS[selected.deck]}・${SECTION_LABEL[selected.section]}: <b>${here}</b>枚</span>
         <button type="button" data-dminus>−1</button><button type="button" data-dplus>+1</button><button type="button" data-dremove>すべて外す</button>
       </div>
-      <div class="act-row">${targets.join('')}<label class="move-all"><input type="checkbox" id="moveAll"> 全部移動</label></div>`;
+      <div class="act-row">${targets.join('')}<label class="move-all"><input type="checkbox" id="moveAll"> 全部移動</label></div>
+      <div class="act-row tag-row">
+        <span>タグ（デッキ${DECK_LABELS[selected.deck]}）:</span>
+        ${tags.map((t) => `<span class="tag-chip">${esc(t)}<button type="button" data-untag="${esc(t)}" title="タグを外す">×</button></span>`).join('')}
+        ${tags.length < MAX_TAGS ? `<input id="tagInput" list="tagOptions" maxlength="20" placeholder="タグを追加（Enter）"><datalist id="tagOptions">${known.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>` : ''}
+      </div>
+      ${known.length ? `<div class="act-row tag-row"><span class="muted">使ったタグ:</span>${known.map((t) => `<button type="button" class="tag-pick" data-addtag="${esc(t)}">＋${esc(t)}</button>`).join('')}</div>` : ''}`;
   }
   const stats = [c.attr, c.level, c.pscale && `スケール ${c.pscale}`, c.species, c.effect, c.atk, c.def].filter(Boolean).join(' / ');
   box.innerHTML = `<div class="detail-body">
@@ -766,11 +796,74 @@ function exportText() {
       const parts = [`【デッキ${DECK_LABELS[i]}】${d.name}`];
       for (const s of SECTIONS) {
         parts.push(`＜${SECTION_LABEL[s]}デッキ ${sectionTotal(d[s])}枚＞`);
-        for (const e of sortedList(d[s])) parts.push(`${e.count} ${cardInfo(e.cid).name}`);
+        for (const e of sortedList(d[s])) {
+          const tags = d.tags[e.cid] || [];
+          parts.push(`${e.count} ${cardInfo(e.cid).name}${tags.length ? ` ［${tags.join('・')}］` : ''}`);
+        }
       }
       return parts.join('\n');
     })
     .join('\n\n');
+}
+
+// ---- 初手シミュレーション ----
+
+const HAND_SIZE = 5;
+const HAND_TRIALS = 10000;
+let handDeck = 0;
+
+function openHandSim(deckIdx) {
+  handDeck = deckIdx;
+  renderHandSim();
+  $('handDialog').showModal();
+}
+
+function renderHandSim() {
+  const d = state.decks[handDeck];
+  const res = simulateHands(d.main, d.tags, { trials: HAND_TRIALS, hand: HAND_SIZE });
+  const pct = (n) => `${((n / res.trials) * 100).toFixed(1)}%`;
+  $('handTitle').textContent = `初手シミュレーション：デッキ${DECK_LABELS[handDeck]}「${d.name}」`;
+  if (res.size < HAND_SIZE) {
+    $('handInfo').textContent = `メインデッキが${res.size}枚しかないため、${HAND_SIZE}枚の初手を引けません。`;
+    $('handResults').innerHTML = '';
+    return;
+  }
+  $('handInfo').textContent = `メインデッキ ${res.size}枚からランダムに ${HAND_SIZE}枚引く試行を ${res.trials.toLocaleString()}回行い、タグの付いたカードを何枚引いたかを数えました。`;
+  if (!res.results.length) {
+    $('handResults').innerHTML = '<p>メインデッキのカードにタグが付いていません。デッキのカードをクリックし、詳細欄の「タグ」から付けてください。</p>';
+    return;
+  }
+  $('handResults').innerHTML = res.results
+    .map((r) => {
+      const atLeastOne = res.trials - r.dist[0];
+      const multi = r.cards.some((e) => e.count >= 2);
+      const rows = r.dist
+        .slice(0, Math.min(HAND_SIZE, r.copies) + 1)
+        .map((n, k) => {
+          let dup = '—';
+          if (k >= 2 && multi) dup = r.dup[k] ? `${pct(r.dup[k])}<small>（${k}枚のときの ${((r.dup[k] / n) * 100).toFixed(0)}%）</small>` : 'なし';
+          return `<tr><td>${k}枚</td><td class="bar-cell"><span class="bar" style="width:${(n / res.trials) * 100}%"></span><span>${pct(n)}</span></td><td class="num">${n.toLocaleString()}</td><td>${dup}</td></tr>`;
+        })
+        .join('');
+      const dupCards = Object.entries(r.dupByCard)
+        .sort((a, b) => b[1] - a[1])
+        .map(([cid, n]) => `${esc(cardInfo(cid).name)} ${pct(n)}`);
+      const dupNote = !multi
+        ? 'このタグのカードはすべて1枚採用なので、同名カードが重なることはありません。'
+        : dupCards.length
+          ? `同名カードを2枚以上引いた割合: ${dupCards.join('、')}`
+          : '同名カードを2枚以上引いた試行はありませんでした。';
+      return `<section class="hand-tag">
+          <h3>「${esc(r.tag)}」 <span class="muted">対象 ${r.copies}枚</span> <b>1枚以上: ${pct(atLeastOne)}</b></h3>
+          <p class="hand-cards">${r.cards.map((e) => `${esc(cardInfo(e.cid).name)}×${e.count}`).join('、')}</p>
+          <table>
+            <thead><tr><th>引いた枚数</th><th>割合</th><th>回数</th><th>うち同名カードを含む</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <p class="dup-note">${dupNote}</p>
+        </section>`;
+    })
+    .join('');
 }
 
 function openTeamDialog() {
@@ -810,6 +903,7 @@ async function loadSave(file) {
       state.decks = data.decks.map((d, i) => ({
         name: String(d.name || `デッキ${DECK_LABELS[i]}`),
         ...Object.fromEntries(SECTIONS.map((s) => [s, (d[s] || []).filter((e) => /^\d+$/.test(e.cid) && e.count > 0).map((e) => ({ cid: e.cid, count: Number(e.count) }))])),
+        tags: cleanDeckTags(d.tags),
       }));
     });
     toast('読み込みました');
@@ -891,7 +985,7 @@ function onRoomMessage(r, msg) {
     r.everJoined = true;
     r.seed = false;
     r.retry = 0;
-    state.decks = msg.decks;
+    state.decks = withTags(msg.decks);
     Object.assign(state.cards, msg.cards);
     const pending = r.pending;
     r.pending = [];
@@ -1075,6 +1169,7 @@ function bindEvents() {
     if (act) {
       const i = Number(act.dataset.deck);
       if (act.dataset.act === 'import') return openImport(i);
+      if (act.dataset.act === 'hands') return openHandSim(i);
       if (act.dataset.act === 'clear' && confirm(`デッキ${DECK_LABELS[i]}のカードをすべて外しますか？`)) {
         mutate(() => SECTIONS.forEach((s) => (state.decks[i][s] = [])));
       }
@@ -1121,6 +1216,17 @@ function bindEvents() {
     if (b.hasAttribute('data-dplus')) return addCard(cid, selected.deck, selected.section);
     if (b.hasAttribute('data-dminus')) return removeCard(cid, selected.deck, selected.section);
     if (b.hasAttribute('data-dremove')) return removeCard(cid, selected.deck, selected.section, 99);
+    const tags = state.decks[selected.deck]?.tags[cid] || [];
+    if (b.dataset.untag !== undefined) return setTags(selected.deck, cid, tags.filter((t) => t !== b.dataset.untag));
+    if (b.dataset.addtag !== undefined) return setTags(selected.deck, cid, [...tags, b.dataset.addtag]);
+  });
+  $('detail').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.id !== 'tagInput' || e.isComposing || !selected || selected.deck == null) return;
+    e.preventDefault();
+    const tag = e.target.value.trim();
+    if (!tag) return;
+    setTags(selected.deck, selected.cid, [...(state.decks[selected.deck].tags[selected.cid] || []), tag]);
+    $('tagInput')?.focus();
   });
 
   // ドラッグ＆ドロップ
@@ -1165,6 +1271,7 @@ function bindEvents() {
 
   // ヘッダー
   $('teamStatus').addEventListener('click', openTeamDialog);
+  $('rerunHands').addEventListener('click', renderHandSim);
   $('undoBtn').addEventListener('click', () => restore(undoStack, redoStack));
   $('redoBtn').addEventListener('click', () => restore(redoStack, undoStack));
   $('importBtn').addEventListener('click', () => openImport());
