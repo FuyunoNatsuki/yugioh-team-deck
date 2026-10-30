@@ -2,7 +2,9 @@
 // Node 18+ と Cloudflare Workers の両方で動くよう、標準の fetch / Response だけを使う。
 
 const BASE = 'https://www.db.yugioh-card.com/yugiohdb';
-const UA = 'Mozilla/5.0 (compatible; team-deck-builder)';
+// 問い合わせ先が分かるよう、ツールの名前とリポジトリの URL を名乗る
+const UA = 'Mozilla/5.0 (compatible; yugioh-team-deck; +https://github.com/FuyunoNatsuki/yugioh-team-deck)';
+const MAX_UPSTREAM = 4; // コナミのサーバーへ同時に送るリクエストの上限（実行インスタンスごと）
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -11,12 +13,54 @@ export class HttpError extends Error {
   }
 }
 
-// 同じリクエストの同時実行もまとめられるよう、Promise ごと短期間キャッシュする
+// コナミのサーバーへのリクエストは、同時に MAX_UPSTREAM 本までにして、まとめて押し寄せないようにする
+let activeUpstream = 0;
+const waitingUpstream = [];
+async function upstream(url, init, read) {
+  while (activeUpstream >= MAX_UPSTREAM) await new Promise((resolve) => waitingUpstream.push(resolve));
+  activeUpstream++;
+  try {
+    const res = await fetch(url, init);
+    if (!res.ok) throw new HttpError(502, `カードデータベースの応答エラー (${res.status})`);
+    return { res, body: await read(res) };
+  } finally {
+    activeUpstream--;
+    waitingUpstream.shift()?.();
+  }
+}
+
+// Cloudflare では、同じデータセンターの利用者全員で共有するキャッシュ（Cache API）にも入れる。
+// Node には Cache API がないので、何もしない
+const EDGE_PREFIX = 'https://cache.yugioh-team-deck/v1/';
+async function edgeMatch(key) {
+  try {
+    return await globalThis.caches?.default?.match(EDGE_PREFIX + encodeURIComponent(key));
+  } catch {
+    return undefined;
+  }
+}
+async function edgePut(key, body, type, ttlMs) {
+  try {
+    const headers = { 'Content-Type': type, 'Cache-Control': `public, max-age=${Math.round(ttlMs / 1000)}` };
+    await globalThis.caches?.default?.put(EDGE_PREFIX + encodeURIComponent(key), new Response(body, { headers }));
+  } catch {}
+}
+
+// 読み取った結果を、まず実行インスタンスのメモリに、次に共有キャッシュに入れる。
+// 同じリクエストの同時実行もまとめられるよう、メモリには Promise ごと入れる。
+// 共有キャッシュの読み書きも Cloudflare では外部へのリクエスト（1 リクエストあたり 50 回まで）に数えるので、
+// 1 回でたくさん読むもの（画像照合の候補）の中では edge: false にして、まとめた結果だけを共有キャッシュに入れる
 const cache = new Map();
-function cached(key, ttlMs, fn) {
+function cached(key, ttlMs, fn, { edge = true } = {}) {
   const hit = cache.get(key);
   if (hit && hit.exp > Date.now()) return hit.promise;
-  const promise = fn();
+  const promise = (async () => {
+    const stored = edge && (await edgeMatch(key));
+    if (stored) return stored.json();
+    const value = await fn();
+    if (edge) await edgePut(key, JSON.stringify(value), 'application/json', ttlMs);
+    return value;
+  })();
   promise.catch(() => cache.delete(key));
   cache.set(key, { promise, exp: Date.now() + ttlMs });
   if (cache.size > 500) cache.delete(cache.keys().next().value);
@@ -29,13 +73,14 @@ async function getHtml(pathAndQuery) {
 
 // cookie を付けて開き、返ってきた cookie も返す（同じセッションで続けて開くため）
 async function getPage(pathAndQuery, cookie = '') {
-  const res = await fetch(BASE + pathAndQuery, {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'ja', ...(cookie ? { Cookie: cookie } : {}) },
-  });
-  if (!res.ok) throw new HttpError(502, `カードデータベースの応答エラー (${res.status})`);
+  const { res, body } = await upstream(
+    BASE + pathAndQuery,
+    { headers: { 'User-Agent': UA, 'Accept-Language': 'ja', ...(cookie ? { Cookie: cookie } : {}) } },
+    (r) => r.text()
+  );
   const setCookies = res.headers.getSetCookie?.() || [];
   const received = setCookies.map((c) => c.split(';')[0]).filter(Boolean);
-  return { html: await res.text(), cookie: [cookie, ...received].filter(Boolean).join('; ') };
+  return { html: body, cookie: [cookie, ...received].filter(Boolean).join('; ') };
 }
 
 // ---- HTML の読み取り ----
@@ -145,7 +190,7 @@ export function searchCards(params) {
     for (const v of params.getAll(key)) if (/^\d{1,2}$/.test(v)) q.append(key, v);
   }
   const query = q.toString();
-  return cached('search:' + query, 10 * 60 * 1000, async () => {
+  return cached('search:' + query, 60 * 60 * 1000, async () => {
     const html = await getHtml('/card_search.action?' + query);
     const total = html.includes('該当データがありません') ? 0 : Number((html.match(/検索結果\s*([\d,]+)件/) || [, '0'])[1].replace(/,/g, ''));
     return { total, page: Number(q.get('page')), rp: Number(q.get('rp')), cards: parseRows(html) };
@@ -180,7 +225,7 @@ export function fetchLimits() {
 // ニューロンのデッキコード（例: 1sgb47h）から読み込む。デッキコードがあれば、ログインしていなくても
 // 非公開のデッキを見られる。デッキ検索の結果に出るリンク（deck_code 付き）を、同じセッションのまま開く
 function fetchDeckByCode(code) {
-  return cached('deckcode:' + code, 5 * 60 * 1000, async () => {
+  return cached('deckcode:' + code, 2 * 60 * 1000, async () => {
     const q = new URLSearchParams({ ope: '1', sess: '1', rp: '10', deck_code: code, request_locale: 'ja' });
     const search = await getPage('/deck_search.action?' + q);
     const href = search.html.match(/href="\/yugiohdb(\/member_deck\.action\?[^"]*deck_code=[^"]*)"/)?.[1];
@@ -243,10 +288,19 @@ export function fetchDeck(input) {
   // デッキコード付きの URL（デッキ検索の結果のリンクなど）なら、コードから開く（非公開でも見られる）
   const code = url.searchParams.get('deck_code') || '';
   if (/^[0-9a-z]{4,20}$/i.test(code)) return fetchDeckByCode(code.toLowerCase());
-  return cached(`deck:${cgid}:${dno}`, 60 * 1000, async () => {
-    const html = await getHtml(`/member_deck.action?ope=1&cgid=${cgid}&dno=${dno}&request_locale=ja`);
-    return parseDeckPage(html, 'デッキが見つかりません。非公開のデッキは、デッキコードを入力するか、ブックマークレットで読み込んでください');
-  });
+  return fetchDeckPage(cgid, dno);
+}
+
+function fetchDeckPage(cgid, dno, options) {
+  return cached(
+    `deck:${cgid}:${dno}`,
+    2 * 60 * 1000,
+    async () => {
+      const html = await getHtml(`/member_deck.action?ope=1&cgid=${cgid}&dno=${dno}&request_locale=ja`);
+      return parseDeckPage(html, 'デッキが見つかりません。非公開のデッキは、デッキコードを入力するか、ブックマークレットで読み込んでください');
+    },
+    options
+  );
 }
 
 // 公開デッキを新しい順に探して「cgid:dno」の一覧を返す
@@ -256,13 +310,17 @@ async function recentDecks(keyword, limit) {
   return [...new Set([...html.matchAll(/cgid=([0-9a-f]{32})&(?:amp;)?dno=(\d+)/g)].map((m) => `${m[1]}:${m[2]}`))].slice(0, limit);
 }
 
+// 画像照合の候補にする公開デッキの数（多いほど候補は増えるが、コナミのサーバーから読むページも増える）
+const POOL_THEME_DECKS = 10;
+const POOL_RECENT_DECKS = 8;
+
 // 画像照合の候補になるカードを集める: キーワードで見つかる公開デッキと、テーマを問わない最近の公開デッキ
 // （汎用カード用）に入っているカード、カード名にキーワードを含むカード。uses は何個のデッキで使われていたか
 export function fetchPool(keyword) {
   keyword = String(keyword || '').trim().slice(0, 50);
   if (!keyword) throw new HttpError(400, 'デッキのテーマ（キーワード）を入力してください');
-  return cached('pool:' + keyword, 60 * 60 * 1000, async () => {
-    const [themed, recent] = await Promise.all([recentDecks(keyword, 12), cached('recent-decks', 60 * 60 * 1000, () => recentDecks('', 10))]);
+  return cached('pool:' + keyword, 6 * 60 * 60 * 1000, async () => {
+    const [themed, recent] = await Promise.all([recentDecks(keyword, POOL_THEME_DECKS), cached('recent-decks', 6 * 60 * 60 * 1000, () => recentDecks('', POOL_RECENT_DECKS))]);
     const decks = [...new Set([...themed, ...recent])];
     // デッキごとに選ばれているイラストが違うことがあるので、見つかったイラストはすべて残す（imgs）
     const pool = new Map();
@@ -280,7 +338,7 @@ export function fetchPool(keyword) {
         while (next < decks.length) {
           const [cgid, dno] = decks[next++].split(':');
           try {
-            const deck = await fetchDeck(`https://www.db.yugioh-card.com/yugiohdb/member_deck.action?cgid=${cgid}&dno=${dno}`);
+            const deck = await fetchDeckPage(cgid, dno, { edge: false });
             Object.values(deck.cards).forEach(add);
           } catch {}
         }
@@ -295,7 +353,7 @@ export function fetchPool(keyword) {
 // カードのイラスト違いをすべて返す（画像のパラメータの一覧）
 export function fetchArts(cid) {
   if (!/^\d+$/.test(String(cid))) throw new HttpError(400, 'bad cid');
-  return cached('arts:' + cid, 24 * 60 * 60 * 1000, async () => {
+  return cached('arts:' + cid, 7 * 24 * 60 * 60 * 1000, async () => {
     const html = await getHtml(`/card_search.action?ope=2&cid=${cid}&request_locale=ja`);
     const imgs = [...html.matchAll(/get_image\.action\?type=1&cid=(\d+)&ciid=(\d+)&enc=([\w-]+)/g)]
       .filter((m) => m[1] === String(cid))
@@ -304,24 +362,38 @@ export function fetchArts(cid) {
   });
 }
 
+// カード画像はほとんど変わらないので長く持つ。メモリ → 共有キャッシュ → コナミのサーバー の順に探す
 const imageCache = new Map();
+const IMAGE_TTL = 30 * 24 * 60 * 60 * 1000;
 
 export async function fetchImage(params) {
   const cid = params.get('cid') || '';
   const ciid = params.get('ciid') || '1';
   const enc = params.get('enc') || '';
   if (!/^\d+$/.test(cid) || !/^\d+$/.test(ciid) || !/^[\w-]+$/.test(enc)) throw new HttpError(400, 'bad image params');
-  const key = `${cid}:${ciid}:${enc}`;
+  const key = `img:${cid}:${ciid}:${enc}`;
+  let from = 'memory';
   let body = imageCache.get(key);
   if (!body) {
-    const res = await fetch(`${BASE}/get_image.action?type=1&lang=ja&cid=${cid}&ciid=${ciid}&enc=${enc}`, {
-      headers: { 'User-Agent': UA, Referer: BASE + '/' },
-    });
-    if (!res.ok) throw new HttpError(502, `image ${res.status}`);
-    body = new Uint8Array(await res.arrayBuffer());
+    const stored = await edgeMatch(key);
+    if (stored) {
+      from = 'edge';
+      body = new Uint8Array(await stored.arrayBuffer());
+    } else {
+      from = 'origin';
+      body = (
+        await upstream(
+          `${BASE}/get_image.action?type=1&lang=ja&cid=${cid}&ciid=${ciid}&enc=${enc}`,
+          { headers: { 'User-Agent': UA, Referer: BASE + '/' } },
+          async (r) => new Uint8Array(await r.arrayBuffer())
+        )
+      ).body;
+      await edgePut(key, body, 'application/octet-stream', IMAGE_TTL);
+    }
     imageCache.set(key, body);
-    if (imageCache.size > 600) imageCache.delete(imageCache.keys().next().value);
+    if (imageCache.size > 1000) imageCache.delete(imageCache.keys().next().value);
   }
   const type = body[0] === 0x89 ? 'image/png' : body[0] === 0xff ? 'image/jpeg' : 'application/octet-stream';
-  return new Response(body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=604800' } });
+  // X-Cache はどこから返したか（memory / edge / origin）。キャッシュが効いているかの確認用
+  return new Response(body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=2592000, immutable', 'X-Cache': from } });
 }

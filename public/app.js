@@ -687,14 +687,15 @@ async function imageFeature(img) {
   return featureCache.get(img);
 }
 
-// カード画像（イラスト違いがあればそのすべて）を並行して読み込み、特徴量を作る。読み込めなかった画像は除く
+// カード画像（イラスト違いがあればそのすべて）を並行して読み込み、特徴量を作る。読み込めなかった画像は除く。
+// コナミのサーバーにまとめて押し寄せないよう、同時に読むのは 4 枚まで
 async function featuresFor(cards, onProgress) {
   const jobs = cards.flatMap((card) => (card.imgs || [card.img]).filter(Boolean).map((img) => ({ cid: card.cid, img })));
   const out = [];
   let next = 0;
   let done = 0;
   await Promise.all(
-    Array.from({ length: 8 }, async () => {
+    Array.from({ length: 4 }, async () => {
       while (next < jobs.length) {
         const job = jobs[next++];
         try {
