@@ -78,6 +78,16 @@ input[type="search"], input[type="url"], input:not([type]), select, textarea {
 .status.room { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .status.room.offline { color: var(--warn); border-color: var(--warn); }
 .dialog-actions.start { justify-content: flex-start; }
+.room-log-box { margin-top: 10px; }
+.room-log-box summary { cursor: pointer; color: var(--accent); }
+.room-log { list-style: none; margin: 6px 0; padding: 0; max-height: 45vh; overflow-y: auto; font-size: 13px; }
+.room-log li { border-bottom: 1px solid var(--line); padding: 5px 2px; }
+.room-log time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.room-log .who { font-weight: 700; margin-right: 6px; }
+.room-log .act { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; }
+.room-log .act.big { background: var(--warn); color: #fff; border-color: var(--warn); }
+.room-log ul { margin: 3px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.room-log .empty { color: var(--muted); }
 
 /* レイアウト */
 .layout {

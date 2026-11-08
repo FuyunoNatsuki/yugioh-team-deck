@@ -102,7 +102,8 @@ function save() {
   } catch {}
 }
 
-function mutate(fn) {
+// action はルームの変更履歴に出す操作の種類（例: 「カードを追加」「読込（ファイル）」）
+function mutate(fn, action = '編集') {
   const before = JSON.stringify(state.decks);
   fn();
   if (JSON.stringify(state.decks) === before) return render();
@@ -110,7 +111,7 @@ function mutate(fn) {
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
   save();
-  sendRoomOps(diffDecks(JSON.parse(before), state.decks));
+  sendRoomOps(diffDecks(JSON.parse(before), state.decks), action);
   render();
 }
 
@@ -120,7 +121,7 @@ function restore(from, to) {
   to.push(JSON.stringify(state.decks));
   state.decks = JSON.parse(from.pop());
   save();
-  sendRoomOps(diffDecks(before, state.decks));
+  sendRoomOps(diffDecks(before, state.decks), from === undoStack ? '元に戻す' : 'やり直す');
   render();
 }
 
@@ -167,7 +168,7 @@ function addCard(cid, deckIdx, section, n = 1) {
     const e = list.find((x) => x.cid === cid);
     if (e) e.count += n;
     else list.push({ cid, count: n });
-  });
+  }, 'カードを追加');
 }
 
 function removeCard(cid, deckIdx, section, n = 1) {
@@ -177,7 +178,7 @@ function removeCard(cid, deckIdx, section, n = 1) {
     if (!e) return;
     e.count -= n;
     if (e.count <= 0) list.splice(list.indexOf(e), 1);
-  });
+  }, 'カードを外す');
   if (selected?.deck === deckIdx && selected.section === section && !countIn(state.decks[deckIdx][section], cid)) {
     selected = { cid, deck: null };
     renderDetail();
@@ -191,7 +192,7 @@ function setTags(deckIdx, cid, tags) {
     const d = state.decks[deckIdx];
     if (clean.length) d.tags[cid] = clean;
     else delete d.tags[cid];
-  });
+  }, 'タグ');
 }
 
 // ドロー系のカードのドロー枚数を決める（既定の枚数と同じなら指定を外す）
@@ -201,7 +202,7 @@ function setDraw(deckIdx, cid, n) {
     const d = state.decks[deckIdx];
     if (n === DEFAULT_DRAW) delete d.draws[cid];
     else d.draws[cid] = n;
-  });
+  }, 'ドロー枚数');
 }
 
 // デッキ間の移動はチームの合計枚数を変えないので、枠の種類と枚数上限だけ確認する
@@ -222,7 +223,7 @@ function moveCard(cid, from, to, n = 1) {
     const t = target.find((x) => x.cid === cid);
     if (t) t.count += n;
     else target.push({ cid, count: n });
-  });
+  }, '移動');
   if (selected?.cid === cid && !countIn(state.decks[from.deck][from.section], cid)) selected = { cid, ...to };
   renderDetail();
 }
@@ -477,13 +478,13 @@ function openImport(deckIdx = state.active) {
 }
 
 // 読み込んだデッキ（{ name, main, extra, side }）で指定のデッキを置き換える。チーム制限は超えていても読み込み、警告する
-function applyDeck(deckIdx, deck, cards) {
+function applyDeck(deckIdx, deck, cards, action) {
   Object.assign(state.cards, cards);
   mutate(() => {
     const d = state.decks[deckIdx];
     d.name = deck.name || d.name;
     for (const s of SECTIONS) d[s] = deck[s].map((e) => ({ ...e }));
-  });
+  }, action);
   const bad = violations();
   if (bad.length) {
     toast(`登録しました。チーム制限を超えているカードが${bad.length}種類あります`, 'error');
@@ -504,7 +505,7 @@ async function doImport() {
     if (!res.ok) throw new Error(data.error);
     $('importDialog').close();
     $('importUrl').value = '';
-    applyDeck(deckIdx, data, data.cards);
+    applyDeck(deckIdx, data, data.cards, 'ニューロンから取り込み');
   } catch (e) {
     $('importError').textContent = e.message || 'インポートに失敗しました';
   } finally {
@@ -612,7 +613,7 @@ function bindReceiveEvents() {
     const { deck, cards } = receivedDeck;
     receivedDeck = null;
     $('receiveDialog').close();
-    applyDeck(Number($('receiveTarget').value), deck, cards);
+    applyDeck(Number($('receiveTarget').value), deck, cards, '非公開デッキを受け取り');
     completeCardInfo(Object.keys(cards));
   });
 }
@@ -855,7 +856,7 @@ function registerImage() {
   }
   if (skipped && !confirm(`未確定のカード${skipped}枚は登録されません。登録しますか？`)) return;
   $('imageDialog').close();
-  applyDeck(Number($('imageTarget').value), deck, cards);
+  applyDeck(Number($('imageTarget').value), deck, cards, '画像から登録');
 }
 
 function bindImageEvents() {
@@ -1131,7 +1132,7 @@ async function loadSave(file) {
         tags: cleanDeckTags(d.tags),
         draws: cleanDeckDraws(d.draws),
       }));
-    });
+    }, '読込（ファイル）');
     toast('読み込みました');
   } catch {
     toast('このファイルは読み込めません', 'error');
@@ -1147,6 +1148,15 @@ async function loadSave(file) {
 
 const ROOM_ID = /^[a-z0-9]{12}$/;
 const clientId = Math.random().toString(36).slice(2, 12);
+const NAME_KEY = 'ygoTeamDeck.name'; // ルームで名乗る名前（変更履歴に出る）
+
+function myName() {
+  try {
+    return localStorage.getItem(NAME_KEY) || '';
+  } catch {
+    return '';
+  }
+}
 
 function newRoomId() {
   const chars = 'abcdefghijkmnpqrstuvwxyz23456789';
@@ -1168,7 +1178,8 @@ function usedCards() {
 // seed が true なら今のデッキでルームを作る（すでにあればそのルームに参加する）
 function enterRoom(id, seed) {
   if (room) leaveRoom(false);
-  room = { id, ws: null, joined: false, everJoined: false, seed, pending: [], unacked: new Map(), inflight: new Map(), peers: 0, retry: 0, timer: 0 };
+  // log は読み込んだ変更履歴（新しい順）。logLoaded は一度でも読み込んだか
+  room = { id, ws: null, joined: false, everJoined: false, seed, pending: [], unacked: new Map(), inflight: new Map(), peers: 0, names: [], retry: 0, timer: 0, log: [], logMore: false, logLoaded: false };
   history.replaceState(null, '', roomShareUrl(id));
   connectRoom(room);
   renderRoom();
@@ -1178,7 +1189,7 @@ function connectRoom(r) {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/room/${r.id}`);
   r.ws = ws;
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'hello', seed: r.seed ? { decks: state.decks, cards: usedCards() } : undefined }));
+    ws.send(JSON.stringify({ type: 'hello', name: myName(), seed: r.seed ? { decks: state.decks, cards: usedCards() } : undefined }));
   };
   ws.onmessage = (e) => {
     if (room !== r) return;
@@ -1218,10 +1229,12 @@ function onRoomMessage(r, msg) {
     applyOps(state.decks, pending);
     undoStack.length = 0;
     redoStack.length = 0;
-    sendRoomOps(pending);
+    sendRoomOps(pending, '切断中の変更');
     render();
     renderRoom();
     if (first) toast('ルームに参加しました');
+    // つなぎ直したときは、開いている変更履歴を読み直す（切れている間の分も出す）
+    else if ($('roomLogBox').open) requestRoomLog();
   } else if (msg.type === 'ops') {
     Object.assign(state.cards, msg.cards || {});
     if (msg.from === clientId && r.unacked.has(msg.id)) {
@@ -1244,14 +1257,24 @@ function onRoomMessage(r, msg) {
     render();
   } else if (msg.type === 'peers') {
     r.peers = msg.count;
+    r.names = Array.isArray(msg.names) ? msg.names : [];
     renderRoom();
+  } else if (msg.type === 'log') {
+    r.log = msg.before ? [...r.log, ...msg.entries] : msg.entries;
+    r.logMore = msg.more;
+    r.logLoaded = true;
+    renderRoomLog();
+  } else if (msg.type === 'logEntry') {
+    if (!r.logLoaded) return;
+    r.log.unshift(msg.entry);
+    renderRoomLog();
   } else if (msg.type === 'error') {
     toast(msg.message, 'error');
     if (msg.code === 'notfound') leaveRoom(false);
   }
 }
 
-function sendRoomOps(ops) {
+function sendRoomOps(ops, action = '編集') {
   if (!room || !ops.length) return;
   if (!room.joined || room.ws?.readyState !== WebSocket.OPEN) {
     room.pending.push(...ops);
@@ -1263,7 +1286,7 @@ function sendRoomOps(ops) {
   for (const op of ops) if (op.count > 0 && state.cards[op.cid]) cards[op.cid] = state.cards[op.cid];
   room.unacked.set(id, ops);
   for (const op of ops) room.inflight.set(opKey(op), (room.inflight.get(opKey(op)) || 0) + 1);
-  room.ws.send(JSON.stringify({ type: 'ops', id, from: clientId, ops, cards }));
+  room.ws.send(JSON.stringify({ type: 'ops', id, from: clientId, ops, cards, action }));
 }
 
 // keepAsk が true なら、ルームのデッキを手元に残すか聞く
@@ -1300,14 +1323,53 @@ function renderRoom() {
   chip.classList.toggle('offline', !online);
   const waiting = room.pending.length ? `・未送信 ${room.pending.length}件` : '';
   chip.textContent = online ? `ルーム参加中（${room.peers}人）` : `${room.everJoined ? '再接続中' : '接続中'}…${waiting}`;
-  chip.title = 'ルームの共有 URL を表示';
+  chip.title = online && room.names.length ? `つながっている人: ${room.names.join('、')}` : 'ルームの共有 URL を表示';
   $('roomShareUrl').value = roomShareUrl(room.id);
   $('roomInfo').textContent = online
-    ? `ルーム ${room.id} に参加中です。いま ${room.peers} 人がつながっています。`
+    ? `ルーム ${room.id} に参加中です。いま ${room.peers} 人がつながっています${room.names.length ? `（${room.names.join('、')}）` : ''}。`
     : `ルーム ${room.id} に${room.everJoined ? 'つなぎ直しています' : '接続しています'}…${waiting}`;
 }
 
+// 変更履歴を新しい順に読む。more が true なら、読み込み済みの最後より古いものを続けて読む
+function requestRoomLog(more = false) {
+  if (!room?.joined) return;
+  const before = more ? room.log.at(-1)?.key : undefined;
+  room.ws.send(JSON.stringify({ type: 'log', before }));
+}
+
+// デッキを丸ごと置き換える操作は、変更履歴で目立たせる
+const BIG_ACTIONS = ['読込（ファイル）', '元に戻す', 'やり直す', 'クリア', 'ニューロンから取り込み', '画像から登録', '非公開デッキを受け取り', 'ルームを作成'];
+
+function renderRoomLog() {
+  if (!room) return;
+  const when = (t) => new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  $('roomLog').innerHTML = room.log.length
+    ? room.log
+        .map(
+          (e) => `<li>
+            <time datetime="${new Date(e.t).toISOString()}">${when(e.t)}</time><span class="who">${esc(e.name)}</span><span class="act${BIG_ACTIONS.includes(e.action) ? ' big' : ''}">${esc(e.action)}</span>
+            ${e.lines?.length ? `<ul>${e.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+          </li>`
+        )
+        .join('')
+    : '<li class="empty">まだ変更履歴はありません（記録は、この機能を入れたあとの変更からです）</li>';
+  $('roomLogMore').hidden = !room.logMore;
+}
+
 function bindRoomEvents() {
+  $('roomName').value = myName();
+  $('roomName').addEventListener('change', () => {
+    const name = $('roomName').value.trim().slice(0, 20);
+    $('roomName').value = name;
+    try {
+      localStorage.setItem(NAME_KEY, name);
+    } catch {}
+    if (room?.joined) room.ws.send(JSON.stringify({ type: 'name', name }));
+  });
+  $('roomLogBox').addEventListener('toggle', () => {
+    if ($('roomLogBox').open && room && !room.logLoaded) requestRoomLog();
+  });
+  $('roomLogMore').addEventListener('click', () => requestRoomLog(true));
   const open = () => {
     renderRoom();
     $('roomDialog').showModal();
@@ -1397,7 +1459,7 @@ function bindEvents() {
       if (act.dataset.act === 'import') return openImport(i);
       if (act.dataset.act === 'hands') return openHandSim(i);
       if (act.dataset.act === 'clear' && confirm(`デッキ${DECK_LABELS[i]}のカードをすべて外しますか？`)) {
-        mutate(() => SECTIONS.forEach((s) => (state.decks[i][s] = [])));
+        mutate(() => SECTIONS.forEach((s) => (state.decks[i][s] = [])), 'クリア');
       }
       return;
     }
@@ -1420,7 +1482,7 @@ function bindEvents() {
     if (!e.target.classList.contains('deck-name')) return;
     const i = Number(e.target.dataset.deck);
     const name = e.target.value.trim() || `デッキ${DECK_LABELS[i]}`;
-    mutate(() => (state.decks[i].name = name));
+    mutate(() => (state.decks[i].name = name), 'デッキ名');
   });
   $('deckTabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');

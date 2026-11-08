@@ -20,14 +20,15 @@ export default {
     }
     // 管理者用: ルームを過去の時点に戻す。合言葉（ADMIN_TOKEN、wrangler secret で設定）が必要
     //   POST /api/room/<id>/restore  Authorization: Bearer <ADMIN_TOKEN>  body: { "time": "2026-11-07T19:05:00+09:00" }
-    const restore = url.pathname.match(/^\/api\/room\/([a-z0-9]{12})\/restore$/);
-    if (restore) {
+    //   POST /api/room/<id>/writes  （同じ合言葉）body: { "from": …, "to": …, "stepSec": 60 }  書き込みがあった時刻を調べる（読み取りだけ）
+    const admin = url.pathname.match(/^\/api\/room\/([a-z0-9]{12})\/(restore|writes)$/);
+    if (admin) {
       const token = env.ADMIN_TOKEN;
       if (request.method !== 'POST' || !token || !(await sameSecret(request.headers.get('Authorization') || '', `Bearer ${token}`))) {
         return new Response('Forbidden', { status: 403 });
       }
       const body = await request.text();
-      return env.ROOMS.get(env.ROOMS.idFromName(restore[1])).fetch(new Request('https://room/restore', { method: 'POST', body }));
+      return env.ROOMS.get(env.ROOMS.idFromName(admin[1])).fetch(new Request(`https://room/${admin[2]}`, { method: 'POST', body }));
     }
     if (url.pathname.startsWith('/api/')) return handleApi(request);
     return env.ASSETS.fetch(request);
