@@ -55,10 +55,38 @@ export class DeckRoom {
   }
 
   async fetch(request) {
+    if (new URL(request.url).pathname === '/restore' && request.method === 'POST') return this.restore(request);
     if (request.headers.get('Upgrade') !== 'websocket') return new Response('WebSocket only', { status: 426 });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  // ルームを過去の時点に戻す（管理者用。worker.js で合言葉を確かめてから呼ばれる）。
+  // Cloudflare の Point-in-Time Recovery を使うので、戻せるのは過去 30 日まで。
+  // body: { time: 日時 } か { bookmark: 戻し先 }。戻す直前の状態を指す undo を返すので、それを bookmark に渡せば取り消せる
+  async restore(request) {
+    const { time, bookmark } = await request.json().catch(() => ({}));
+    let target = typeof bookmark === 'string' ? bookmark : '';
+    if (!target) {
+      const at = Date.parse(time);
+      if (!Number.isFinite(at)) return Response.json({ error: 'time か bookmark を指定してください' }, { status: 400 });
+      try {
+        target = await this.ctx.storage.getBookmarkForTime(at);
+      } catch (e) {
+        return Response.json({ error: `その時点には戻せません（${e.message}）` }, { status: 400 });
+      }
+    }
+    const undo = await this.ctx.storage.onNextSessionRestoreBookmark(target);
+    // 参加中の人は一度切断する（再起動を表す 1012）。ブラウザは自動でつなぎ直し、戻した内容を受け取る
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1012, 'restored');
+      } catch {}
+    }
+    // 応答を返してから再起動する。再起動したときに戻し先の状態になる
+    setTimeout(() => this.ctx.abort('restore'), 100);
+    return Response.json({ restoredTo: target, undo });
   }
 
   joined() {

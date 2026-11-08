@@ -71,6 +71,16 @@ npm start
 
 ルームは Cloudflare の Durable Objects（`src/room.js`）で動くため、`npm start` のローカルサーバーでは使えません。手元で試すときは `npx wrangler dev` を使います。
 
+### ルームを過去の時点に戻す（管理者用）
+
+ルームの中身は、Cloudflare の Point-in-Time Recovery で過去 30 日以内の任意の時点に戻せます。合言葉（`ADMIN_TOKEN`）を `npx wrangler secret put ADMIN_TOKEN` で設定しておき、次のように呼びます。
+
+```bash
+curl -X POST "https://yugioh-team-deck.natsuki-tools.workers.dev/api/room/<ルームID>/restore" -H "Authorization: Bearer <合言葉>" -H "Content-Type: application/json" -d '{"time":"2026-11-07T19:05:00+09:00"}'
+```
+
+戻すと、その時点より後の変更は全員から消えます。参加中の人は自動でつなぎ直し、戻した内容を受け取ります。応答の `undo` を `{"bookmark":"<undo>"}` として同じように送ると、戻す前の状態に戻せます。
+
 ## コナミのサーバーへの負担を抑える仕組み
 
 カード検索・禁止制限リスト・デッキ・カード画像は、遊戯王ニューロン（公式カードデータベース）から読み込みます。負担をかけないよう、次のようにしています。

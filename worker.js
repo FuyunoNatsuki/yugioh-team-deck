@@ -3,6 +3,12 @@ import { handleApi } from './src/api.js';
 
 export { DeckRoom } from './src/room.js';
 
+// 合言葉の比べ方で長さや中身が推測されないよう、ハッシュにしてから一定時間で比べる
+async function sameSecret(given, expected) {
+  const hash = async (s) => crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return crypto.subtle.timingSafeEqual(await hash(given), await hash(expected));
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -11,6 +17,17 @@ export default {
       // このサイトのページからの接続だけ受け付ける
       if (request.headers.get('Origin') !== url.origin) return new Response('Forbidden', { status: 403 });
       return env.ROOMS.get(env.ROOMS.idFromName(room[1])).fetch(request);
+    }
+    // 管理者用: ルームを過去の時点に戻す。合言葉（ADMIN_TOKEN、wrangler secret で設定）が必要
+    //   POST /api/room/<id>/restore  Authorization: Bearer <ADMIN_TOKEN>  body: { "time": "2026-11-07T19:05:00+09:00" }
+    const restore = url.pathname.match(/^\/api\/room\/([a-z0-9]{12})\/restore$/);
+    if (restore) {
+      const token = env.ADMIN_TOKEN;
+      if (request.method !== 'POST' || !token || !(await sameSecret(request.headers.get('Authorization') || '', `Bearer ${token}`))) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const body = await request.text();
+      return env.ROOMS.get(env.ROOMS.idFromName(restore[1])).fetch(new Request('https://room/restore', { method: 'POST', body }));
     }
     if (url.pathname.startsWith('/api/')) return handleApi(request);
     return env.ASSETS.fetch(request);
