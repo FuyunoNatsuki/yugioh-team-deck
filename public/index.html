@@ -19,7 +19,7 @@
       <button id="redoBtn" type="button" title="やり直す (Ctrl+Y)">↷</button>
       <button id="importBtn" type="button" class="primary" title="デッキコードかデッキの URL から読み込む">ニューロンからインポート</button>
       <button id="imageBtn" type="button" class="primary">画像から登録</button>
-      <button id="libraryBtn" type="button" title="デッキの一覧（採用する 3 デッキの切り替え、追加、複製、削除）">デッキ一覧</button>
+      <button id="libraryBtn" type="button" title="デッキの一覧（採用する 3 デッキの切り替え、追加、コピー、削除）">デッキ一覧</button>
       <button id="exportBtn" type="button">テキスト出力</button>
       <button id="saveBtn" type="button" title="3デッキをファイルに保存">保存</button>
       <button id="loadBtn" type="button" title="保存したファイルを読み込む">読込</button>
@@ -90,6 +90,14 @@
     </aside>
 
     <section class="decks-pane">
+      <div class="deck-bar">
+        <label>並び順
+          <select id="sortMode" title="デッキの中のカードの並び順（自分の画面とテキスト出力だけに反映）">
+            <option value="kind">カード種類順</option>
+            <option value="name">名前順</option>
+          </select>
+        </label>
+      </div>
       <nav class="deck-tabs" id="deckTabs"></nav>
       <div class="decks" id="decks"></div>
       <p class="hint">ドラッグでデッキ間・メイン／サイド間を移動（1枚ずつ）／検索欄へドラッグか右クリックで1枚外す／カードをクリックすると詳細と移動ボタンを表示</p>

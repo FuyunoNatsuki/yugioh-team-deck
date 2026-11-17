@@ -266,6 +266,8 @@ input[type="search"], input[type="url"], input:not([type]), select, textarea {
 .lim-inline { display: inline-flex; align-items: center; gap: 4px; }
 .lim-inline .lim { position: static; }
 .result .thumb .lim { left: 0; top: 0; width: 21px; height: 14px; }
+.deck-bar { display: flex; justify-content: flex-end; gap: 8px; padding: 6px 12px 0; font-size: 12px; color: var(--muted); }
+.deck-bar select { font-size: 12px; padding: 2px 4px; }
 .hint { margin: 0; padding: 0 12px 8px; font-size: 12px; color: var(--muted); }
 
 /* タグ */

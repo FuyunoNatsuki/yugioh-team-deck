@@ -260,7 +260,23 @@ function createDeck(name, source, slot = -1) {
   mutate(() => {
     state.decks.push(deck);
     if (slot >= 0) state.slots = state.slots.map((id, i) => (i === slot ? deck.id : id));
-  }, source ? 'デッキを複製' : 'デッキを追加');
+  }, source ? 'デッキをコピー' : 'デッキを追加');
+  return deck;
+}
+
+// 「〇〇のコピー」「〇〇のコピー2」… と、一覧にない名前を付ける
+function copyName(name) {
+  const base = `${name.replace(/のコピー\d*$/, '')}のコピー`.slice(0, 36);
+  const used = new Set(state.decks.map((d) => d.name));
+  for (let n = 1; ; n++) if (!used.has(n === 1 ? base : base + n)) return n === 1 ? base : base + n;
+}
+
+// デッキの中身（カード・タグ・ドロー枚数）をコピーして一覧に足す。slot を指定すれば、その列をコピーに切り替える
+function duplicateDeck(id, slot = -1) {
+  const source = deckById(id);
+  if (!source) return null;
+  const deck = createDeck(copyName(source.name), source, slot);
+  if (deck) toast(slot >= 0 ? `「${deck.name}」を作って${DECK_LABELS[slot]}に採用しました（元のデッキは一覧に残っています）` : `「${deck.name}」をデッキ一覧に追加しました。列の見出しのメニューか「デッキ一覧」から採用できます`);
   return deck;
 }
 
@@ -294,13 +310,48 @@ function limitBadge(cid) {
   return lim < 3 ? `<span class="lim lim${lim}" title="${LIMIT_NAME[lim]}" role="img" aria-label="${LIMIT_NAME[lim]}">${limitIcon(lim)}</span>` : '';
 }
 
-// 種類（モンスター・魔法・罠）ごとに読み順で並べる。ルームで同時に追加しても全員が同じ並びになる
-function sortedList(list) {
-  return [...list].sort((a, b) => {
-    const ca = cardInfo(a.cid);
-    const cb = cardInfo(b.cid);
-    return (KIND_ORDER[ca.kind] ?? 0) - (KIND_ORDER[cb.kind] ?? 0) || (ca.ruby || ca.name).localeCompare(cb.ruby || cb.name, 'ja');
-  });
+// デッキの中のカードの並び順。並び替えは見た目だけで、デッキの中身やルームのほかの人の表示は変わらない
+const SORT_KEY = 'ygoTeamDeck.sort';
+const SORT_MODES = { kind: 'カード種類順', name: '名前順' };
+let sortMode = (() => {
+  try {
+    return SORT_MODES[localStorage.getItem(SORT_KEY)] ? localStorage.getItem(SORT_KEY) : 'kind';
+  } catch {
+    return 'kind';
+  }
+})();
+
+// 種類順の細かい並び: モンスターは通常→効果→儀式→融合→シンクロ→エクシーズ→リンク、
+// 魔法は通常→速攻→永続→装備→フィールド→儀式、罠は通常→永続→カウンター
+const MONSTER_TYPES = ['儀式', '融合', 'シンクロ', 'エクシーズ', 'リンク'];
+const SPELL_TRAP_TYPES = ['速攻', '永続', '装備', 'フィールド', '儀式', 'カウンター'];
+function subKind(c) {
+  if (c.kind === 'spell' || c.kind === 'trap') return SPELL_TRAP_TYPES.findIndex((t) => (c.effect || '').includes(t)) + 1;
+  const sp = c.species || '';
+  for (let i = MONSTER_TYPES.length - 1; i >= 0; i--) if (sp.includes(MONSTER_TYPES[i])) return i + 2;
+  return sp && !sp.includes('効果') ? 0 : 1;
+}
+
+const readingOf = (c) => c.ruby || c.name || '';
+const byReading = (ca, cb) => readingOf(ca).localeCompare(readingOf(cb), 'ja');
+const SORTERS = {
+  kind: (ca, cb) => (KIND_ORDER[ca.kind] ?? 0) - (KIND_ORDER[cb.kind] ?? 0) || subKind(ca) - subKind(cb) || byReading(ca, cb),
+  name: byReading,
+};
+
+// 選んだ並び順で並べる。同じ並び順なら、ルームで同時に追加しても全員が同じ並びになる
+function sortedList(list, mode = sortMode) {
+  const cmp = SORTERS[mode] || SORTERS.kind;
+  return [...list].sort((a, b) => cmp(cardInfo(a.cid), cardInfo(b.cid)) || a.cid.localeCompare(b.cid));
+}
+
+function setSortMode(mode) {
+  if (!SORT_MODES[mode]) return;
+  sortMode = mode;
+  try {
+    localStorage.setItem(SORT_KEY, mode);
+  } catch {}
+  renderDecks();
 }
 
 function kindBreakdown(list) {
@@ -321,7 +372,10 @@ function deckPickOptions(slot) {
     const note = other >= 0 && other !== slot ? `・${DECK_LABELS[other]}で採用中` : '';
     return `<option value="${d.id}" ${other === slot ? 'selected' : ''}>${esc(d.name)}（${deckTotal(d)}枚${note}）</option>`;
   });
-  if (state.decks.length < MAX_DECKS) options.push('<option value="__new">＋ 新しいデッキを作ってここに採用</option>');
+  if (state.decks.length < MAX_DECKS) {
+    options.push('<option value="__copy">＋ このデッキをコピーしてここに採用</option>');
+    options.push('<option value="__new">＋ 新しいデッキを作ってここに採用</option>');
+  }
   return options.join('');
 }
 
@@ -359,6 +413,7 @@ function renderDecks() {
             <input class="deck-name" data-deck="${i}" value="${esc(d.name)}" aria-label="デッキ${DECK_LABELS[i]}の名前">
             <button type="button" data-act="hands" data-deck="${i}" title="初手 5 枚にタグの付いたカードが何枚来るかを 1 万回試す">初手</button>
             <button type="button" data-act="import" data-deck="${i}" title="ニューロンから読み込む">取込</button>
+            <button type="button" data-act="copy" data-deck="${i}" title="このデッキをコピーして、デッキ一覧に新しいデッキとして追加する" ${state.decks.length >= MAX_DECKS ? 'disabled' : ''}>コピー</button>
             <button type="button" data-act="clear" data-deck="${i}">クリア</button>
           </div>
           ${sections}
@@ -473,7 +528,7 @@ function render() {
   if ($('libraryDialog').open) renderLibrary();
 }
 
-// デッキ一覧: 採用先（A〜C）、名前、枚数、複製・削除
+// デッキ一覧: 採用先（A〜C）、名前、枚数、コピー・削除
 function renderLibrary() {
   const rows = state.decks.map((d) => {
     const slot = slotOf(d.id);
@@ -490,7 +545,7 @@ function renderLibrary() {
         <td><input class="lib-name" value="${esc(d.name)}" maxlength="40" aria-label="デッキ名"></td>
         ${counts}
         <td><div class="row-btns">
-          <button type="button" data-dup ${state.decks.length >= MAX_DECKS ? 'disabled' : ''}>複製</button>
+          <button type="button" data-dup ${state.decks.length >= MAX_DECKS ? 'disabled' : ''}>コピー</button>
           <button type="button" data-del ${canDelete ? '' : 'disabled'} title="${slot >= 0 ? '採用中のデッキは削除できません' : state.decks.length <= 3 ? 'デッキは3つ以上必要です' : '一覧から削除'}">削除</button>
         </div></td>
       </tr>`;
@@ -510,7 +565,7 @@ function bindLibraryEvents() {
     const b = e.target.closest('button');
     if (!id || !b) return;
     if (b.dataset.adopt !== undefined) return pickDeck(Number(b.dataset.adopt), id);
-    if (b.hasAttribute('data-dup')) return createDeck(`${deckById(id).name}のコピー`.slice(0, 40), deckById(id));
+    if (b.hasAttribute('data-dup')) return duplicateDeck(id);
     if (b.hasAttribute('data-del')) return deleteDeck(id);
   });
   $('libraryTable').addEventListener('change', (e) => {
@@ -1595,6 +1650,7 @@ function bindEvents() {
       const i = Number(act.dataset.deck);
       if (act.dataset.act === 'import') return openImport(i);
       if (act.dataset.act === 'hands') return openHandSim(i);
+      if (act.dataset.act === 'copy') return duplicateDeck(slotDeck(i).id);
       if (act.dataset.act === 'clear' && confirm(`デッキ${DECK_LABELS[i]}のカードをすべて外しますか？`)) {
         mutate(() => SECTIONS.forEach((s) => (slotDeck(i)[s] = [])), 'クリア');
       }
@@ -1619,6 +1675,7 @@ function bindEvents() {
     const i = Number(e.target.dataset.deck);
     if (e.target.classList.contains('deck-pick')) {
       if (e.target.value === '__new') createDeck(`デッキ${state.decks.length + 1}`, null, i);
+      else if (e.target.value === '__copy') duplicateDeck(slotDeck(i).id, i);
       else pickDeck(i, e.target.value);
       return;
     }
@@ -1772,6 +1829,8 @@ bindImageEvents();
 bindRoomEvents();
 bindReceiveEvents();
 bindLibraryEvents();
+$('sortMode').value = sortMode;
+$('sortMode').addEventListener('change', (e) => setSortMode(e.target.value));
 render();
 loadLimits();
 readReceivedDeck(); // ルームに入ると URL が書き換わるので、その前に # のデッキを読む
