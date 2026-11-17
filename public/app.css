@@ -420,6 +420,23 @@ label.inline { display: inline-flex; flex-direction: row; align-items: center; g
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { background: var(--bad); }
+.toast.warn { background: var(--warn); }
+
+/* 採用するデッキの選択とデッキ一覧 */
+.deck-pick { flex: 1; min-width: 0; font-weight: 600; }
+.deck-head.deck-tools { padding-top: 0; }
+#libraryDialog { width: min(820px, calc(100vw - 32px)); }
+.library-wrap { max-height: 60vh; overflow: auto; }
+.library { width: 100%; border-collapse: collapse; font-size: 13px; }
+.library th, .library td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: middle; }
+.library th { position: sticky; top: 0; background: var(--panel); }
+.library tr.adopted td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.library input { width: 100%; min-width: 120px; }
+.library td.num { text-align: center; font-variant-numeric: tabular-nums; }
+.library td.num.bad { color: var(--bad); font-weight: 700; }
+.library .slot-btns, .library .row-btns { display: flex; gap: 3px; flex-wrap: nowrap; }
+.library button { padding: 1px 8px; font-size: 12px; }
+.library button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 
 /* 狭い画面: 検索とデッキを縦に並べ、デッキはタブで 1 つずつ表示 */
 @media (max-width: 1100px) {

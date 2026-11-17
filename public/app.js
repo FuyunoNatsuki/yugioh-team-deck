@@ -1,9 +1,9 @@
 // チーム戦デッキビルダー
-// 3 デッキを同時に編集し、同名カードの採用枚数をチーム全体で制限する。
+// デッキの一覧から 3 デッキを採用して同時に編集し、同名カードの採用枚数をチーム全体で確かめる。
 import { cardFeature, confidence, detectTiles, groupCopies, rankCandidates, tileFeature } from './deckimage.js';
 import { sendDeckFromNeuron } from './bookmarklet.js';
 import { COMBO_TAG, DEFAULT_DRAW, DRAW_TAG, START_TAG, needOf, simulateHands } from './handsim.js';
-import { MAX_DRAW, MAX_TAGS, applyOps, cleanDeckDraws, cleanDeckTags, cleanTags, diffDecks, opKey } from './roomsync.js';
+import { MAX_DECKS, MAX_DRAW, MAX_TAGS, applyOps, blankDeck, cleanTags, diffDecks, newDeckId, normalizeDeckSet, opKey } from './roomsync.js';
 
 const SECTIONS = ['main', 'extra', 'side'];
 const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サイド' };
@@ -54,32 +54,26 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // ---- 状態 ----
-
+// decks はデッキの一覧（{ id, name, main, extra, side, tags, draws }）、slots は採用中の 3 デッキ（A・B・C）の id。
+// 画面の A・B・C の列、チームの枚数制限、初手の計算、テキスト出力は、採用中の 3 デッキが対象。
 // tags はデッキごとのカードのタグ（cid → タグの一覧）、draws はドロー系のカードのドロー枚数（cid → 枚数）
-function newDeck(label) {
-  return { name: `デッキ${label}`, main: [], extra: [], side: [], tags: {}, draws: {} };
-}
-
-// タグやドロー枚数の機能より前に保存したデッキにも、その欄を足す
-function normalizeDecks(decks) {
-  for (const d of decks) {
-    d.tags = cleanDeckTags(d.tags);
-    d.draws = cleanDeckDraws(d.draws);
-  }
-  return decks;
-}
 
 const drawOf = (deck, cid) => deck.draws[cid] || DEFAULT_DRAW;
 
+// 保存したデータを読む。デッキの一覧がなかった頃のもの（3 デッキだけ）もここで移行する
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.decks) && s.decks.length === 3) return { active: 0, cards: {}, ...s, decks: normalizeDecks(s.decks) };
+    if (s && Array.isArray(s.decks)) return { active: 0, cards: {}, ...s, ...normalizeDeckSet(s.decks, s.slots, newDeckId) };
   } catch {}
-  return { decks: DECK_LABELS.map(newDeck), cards: {}, active: 0 };
+  return { active: 0, cards: {}, ...normalizeDeckSet([], null, newDeckId) };
 }
 
 const state = loadState();
+const deckById = (id) => state.decks.find((d) => d.id === id);
+const slotDeck = (slot) => deckById(state.slots[slot]); // slot は 0〜2（A〜C）
+const slotDecks = () => state.slots.map(deckById);
+const deckSet = () => ({ decks: state.decks, slots: state.slots });
 let limits = { cards: {}, names: {}, updated: '' };
 let selected = null; // { cid, deck, section } — deck が null なら検索結果のカード
 const searchCards = {}; // 検索で見つけたカードの情報（デッキに入れたら state.cards へ）
@@ -102,26 +96,28 @@ function save() {
   } catch {}
 }
 
-// action はルームの変更履歴に出す操作の種類（例: 「カードを追加」「読込（ファイル）」）
+// デッキの一覧と採用枠を変える。action はルームの変更履歴に出す操作の種類（例: 「カードを追加」「読込（ファイル）」）
 function mutate(fn, action = '編集') {
-  const before = JSON.stringify(state.decks);
+  const before = JSON.stringify(deckSet());
   fn();
-  if (JSON.stringify(state.decks) === before) return render();
+  if (JSON.stringify(deckSet()) === before) return render();
   undoStack.push(before);
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
   save();
-  sendRoomOps(diffDecks(JSON.parse(before), state.decks), action);
+  sendRoomOps(diffDecks(JSON.parse(before), deckSet()), action);
   render();
 }
 
 function restore(from, to) {
   if (!from.length) return;
-  const before = state.decks;
-  to.push(JSON.stringify(state.decks));
-  state.decks = JSON.parse(from.pop());
+  const before = deckSet();
+  to.push(JSON.stringify(before));
+  const snapshot = JSON.parse(from.pop());
+  state.decks = snapshot.decks;
+  state.slots = snapshot.slots;
   save();
-  sendRoomOps(diffDecks(before, state.decks), from === undoStack ? '元に戻す' : 'やり直す');
+  sendRoomOps(diffDecks(before, deckSet()), from === undoStack ? '元に戻す' : 'やり直す');
   render();
 }
 
@@ -132,9 +128,10 @@ const limitOf = (cid) => (cid in limits.cards ? limits.cards[cid] : 3);
 const countIn = (list, cid) => list.find((e) => e.cid === cid)?.count || 0;
 const sectionTotal = (list) => list.reduce((n, e) => n + e.count, 0);
 
+// チームでの採用枚数（採用中の 3 デッキの合計。控えのデッキは数えない）
 function teamCount(cid) {
   let n = 0;
-  for (const d of state.decks) for (const s of SECTIONS) n += countIn(d[s], cid);
+  for (const d of slotDecks()) for (const s of SECTIONS) n += countIn(d[s], cid);
   return n;
 }
 
@@ -144,7 +141,7 @@ function allowedSection(card, section) {
 }
 
 function violations() {
-  const cids = new Set(state.decks.flatMap((d) => SECTIONS.flatMap((s) => d[s].map((e) => e.cid))));
+  const cids = new Set(slotDecks().flatMap((d) => SECTIONS.flatMap((s) => d[s].map((e) => e.cid))));
   return [...cids].filter((cid) => teamCount(cid) > limitOf(cid));
 }
 
@@ -152,80 +149,138 @@ function remember(cid) {
   if (!state.cards[cid] && searchCards[cid]) state.cards[cid] = searchCards[cid];
 }
 
-function addCard(cid, deckIdx, section, n = 1) {
+// チームの枚数上限や、エクストラ・サイド（15 枚）・メイン（60 枚）の枚数を超えても入れられる。超えたことだけ知らせる
+function warnLimits(cid, slot, section) {
   const card = cardInfo(cid);
-  section ||= $('toSide').checked ? 'side' : card.isExtra ? 'extra' : 'main';
-  if (!allowedSection(card, section)) return toast(`「${card.name}」は${SECTION_LABEL[section]}デッキに入れられません`, 'error');
   const lim = limitOf(cid);
   const used = teamCount(cid);
-  if (used + n > lim) {
-    return toast(lim === 0 ? `「${card.name}」は禁止カードです` : `「${card.name}」はチーム全体で${lim}枚までです（現在${used}枚採用）`, 'error');
-  }
-  const list = state.decks[deckIdx][section];
-  if (sectionTotal(list) + n > SECTION_MAX[section]) return toast(`${SECTION_LABEL[section]}デッキは${SECTION_MAX[section]}枚までです`, 'error');
+  const total = sectionTotal(slotDeck(slot)[section]);
+  const notes = [];
+  if (used > lim) notes.push(lim === 0 ? `「${card.name}」は禁止カードです` : `「${card.name}」がチームの上限（${lim}枚）を超えています（${used}枚）`);
+  if (total > SECTION_MAX[section]) notes.push(`${SECTION_LABEL[section]}デッキが${SECTION_MAX[section]}枚を超えています（${total}枚）`);
+  if (notes.length) toast(notes.join('／'), 'warn');
+}
+
+// slot は 0〜2（A〜C）
+function addCard(cid, slot, section, n = 1) {
+  const card = cardInfo(cid);
+  section ||= $('toSide').checked ? 'side' : card.isExtra ? 'extra' : 'main';
+  // カードの種類と置き場所が合わない（エクストラデッキのカードをメインに入れるなど）ものだけは入れない
+  if (!allowedSection(card, section)) return toast(`「${card.name}」は${SECTION_LABEL[section]}デッキに入れられません`, 'error');
   remember(cid);
   mutate(() => {
+    const list = slotDeck(slot)[section];
     const e = list.find((x) => x.cid === cid);
     if (e) e.count += n;
     else list.push({ cid, count: n });
   }, 'カードを追加');
+  warnLimits(cid, slot, section);
 }
 
-function removeCard(cid, deckIdx, section, n = 1) {
+function removeCard(cid, slot, section, n = 1) {
   mutate(() => {
-    const list = state.decks[deckIdx][section];
+    const list = slotDeck(slot)[section];
     const e = list.find((x) => x.cid === cid);
     if (!e) return;
     e.count -= n;
     if (e.count <= 0) list.splice(list.indexOf(e), 1);
   }, 'カードを外す');
-  if (selected?.deck === deckIdx && selected.section === section && !countIn(state.decks[deckIdx][section], cid)) {
+  if (selected?.deck === slot && selected.section === section && !countIn(slotDeck(slot)[section], cid)) {
     selected = { cid, deck: null };
     renderDetail();
   }
 }
 
 // デッキのカードのタグを付け直す（空ならタグを外す）
-function setTags(deckIdx, cid, tags) {
+function setTags(slot, cid, tags) {
   const clean = cleanTags(tags);
   mutate(() => {
-    const d = state.decks[deckIdx];
+    const d = slotDeck(slot);
     if (clean.length) d.tags[cid] = clean;
     else delete d.tags[cid];
   }, 'タグ');
 }
 
 // ドロー系のカードのドロー枚数を決める（既定の枚数と同じなら指定を外す）
-function setDraw(deckIdx, cid, n) {
+function setDraw(slot, cid, n) {
   n = Math.max(1, Math.min(MAX_DRAW, Math.floor(Number(n)) || DEFAULT_DRAW));
   mutate(() => {
-    const d = state.decks[deckIdx];
+    const d = slotDeck(slot);
     if (n === DEFAULT_DRAW) delete d.draws[cid];
     else d.draws[cid] = n;
   }, 'ドロー枚数');
 }
 
-// デッキ間の移動はチームの合計枚数を変えないので、枠の種類と枚数上限だけ確認する
+// 採用中のデッキ間・枠間でカードを移す。カードの種類と置き場所が合わない場合だけ止め、枚数を超えたときは知らせる
 function moveCard(cid, from, to, n = 1) {
   if (from.deck === to.deck && from.section === to.section) return;
   const card = cardInfo(cid);
   if (!allowedSection(card, to.section)) return toast(`「${card.name}」は${SECTION_LABEL[to.section]}デッキに入れられません`, 'error');
-  const have = countIn(state.decks[from.deck][from.section], cid);
-  n = Math.min(n, have);
+  n = Math.min(n, countIn(slotDeck(from.deck)[from.section], cid));
   if (!n) return;
-  const target = state.decks[to.deck][to.section];
-  if (sectionTotal(target) + n > SECTION_MAX[to.section]) return toast(`${SECTION_LABEL[to.section]}デッキは${SECTION_MAX[to.section]}枚までです`, 'error');
   mutate(() => {
-    const src = state.decks[from.deck][from.section];
+    const src = slotDeck(from.deck)[from.section];
     const e = src.find((x) => x.cid === cid);
     e.count -= n;
     if (e.count <= 0) src.splice(src.indexOf(e), 1);
+    const target = slotDeck(to.deck)[to.section];
     const t = target.find((x) => x.cid === cid);
     if (t) t.count += n;
     else target.push({ cid, count: n });
   }, '移動');
-  if (selected?.cid === cid && !countIn(state.decks[from.deck][from.section], cid)) selected = { cid, ...to };
+  warnLimits(cid, to.deck, to.section);
+  if (selected?.cid === cid && !countIn(slotDeck(from.deck)[from.section], cid)) selected = { cid, ...to };
   renderDetail();
+}
+
+// ---- デッキの一覧と採用枠 ----
+
+const slotOf = (id) => state.slots.indexOf(id); // 採用中なら 0〜2、控えなら -1
+const deckTotal = (d) => SECTIONS.reduce((n, s) => n + sectionTotal(d[s]), 0);
+
+// slot の列に、一覧のデッキ id を採用する。ほかの列で採用中のデッキなら、その列と入れ替える
+function pickDeck(slot, id) {
+  if (state.slots[slot] === id || !deckById(id)) return;
+  mutate(() => {
+    const slots = [...state.slots];
+    const other = slots.indexOf(id);
+    if (other >= 0) slots[other] = slots[slot];
+    slots[slot] = id;
+    state.slots = slots;
+  }, '採用デッキの切り替え');
+}
+
+// 一覧に新しいデッキを足す（source があればその中身をコピーする）。slot を指定すれば、その列に採用する
+function createDeck(name, source, slot = -1) {
+  if (state.decks.length >= MAX_DECKS) {
+    toast(`デッキは${MAX_DECKS}個までです。使わないデッキを一覧から削除してください`, 'error');
+    return null;
+  }
+  const deck = source ? { ...JSON.parse(JSON.stringify(source)), id: newDeckId(), name } : blankDeck(newDeckId(), name);
+  mutate(() => {
+    state.decks.push(deck);
+    if (slot >= 0) state.slots = state.slots.map((id, i) => (i === slot ? deck.id : id));
+  }, source ? 'デッキを複製' : 'デッキを追加');
+  return deck;
+}
+
+// 一覧からデッキを消す。採用中のデッキは消せない（先に別のデッキに切り替える）。一覧は 3 つより少なくできない
+function deleteDeck(id) {
+  const deck = deckById(id);
+  if (!deck) return;
+  if (slotOf(id) >= 0) return toast('採用中のデッキは削除できません。先に別のデッキに切り替えてください', 'error');
+  if (state.decks.length <= 3) return toast('デッキは3つ以上必要です', 'error');
+  if (!confirm(`デッキ「${deck.name}」を一覧から削除しますか？（${deckTotal(deck)}枚）`)) return;
+  mutate(() => {
+    state.decks = state.decks.filter((d) => d.id !== id);
+  }, 'デッキを削除');
+}
+
+function renameDeck(id, name) {
+  const deck = deckById(id);
+  if (!deck) return;
+  name = name.trim().slice(0, 40) || deck.name;
+  mutate(() => (deckById(id).name = name), 'デッキ名');
 }
 
 // ---- 描画 ----
@@ -259,9 +314,20 @@ function sectionStatus(section, total) {
   return total > 15 ? 'bad' : 'ok';
 }
 
+// 列の見出しの、採用するデッキを選ぶメニュー。ほかの列で採用中のものは、選ぶと入れ替わる
+function deckPickOptions(slot) {
+  const options = state.decks.map((d) => {
+    const other = slotOf(d.id);
+    const note = other >= 0 && other !== slot ? `・${DECK_LABELS[other]}で採用中` : '';
+    return `<option value="${d.id}" ${other === slot ? 'selected' : ''}>${esc(d.name)}（${deckTotal(d)}枚${note}）</option>`;
+  });
+  if (state.decks.length < MAX_DECKS) options.push('<option value="__new">＋ 新しいデッキを作ってここに採用</option>');
+  return options.join('');
+}
+
 function renderDecks() {
   const bad = new Set(violations());
-  $('decks').innerHTML = state.decks
+  $('decks').innerHTML = slotDecks()
     .map((d, i) => {
       const sections = SECTIONS.map((s) => {
         const total = sectionTotal(d[s]);
@@ -287,6 +353,9 @@ function renderDecks() {
       return `<div class="deck${state.active === i ? ' active' : ''}" data-deck="${i}">
           <div class="deck-head">
             <span class="deck-label">${DECK_LABELS[i]}</span>
+            <select class="deck-pick" data-deck="${i}" aria-label="${DECK_LABELS[i]}に採用するデッキ" title="${DECK_LABELS[i]}に採用するデッキを一覧から選ぶ">${deckPickOptions(i)}</select>
+          </div>
+          <div class="deck-head deck-tools">
             <input class="deck-name" data-deck="${i}" value="${esc(d.name)}" aria-label="デッキ${DECK_LABELS[i]}の名前">
             <button type="button" data-act="hands" data-deck="${i}" title="初手 5 枚にタグの付いたカードが何枚来るかを 1 万回試す">初手</button>
             <button type="button" data-act="import" data-deck="${i}" title="ニューロンから読み込む">取込</button>
@@ -296,7 +365,7 @@ function renderDecks() {
         </div>`;
     })
     .join('');
-  $('deckTabs').innerHTML = state.decks
+  $('deckTabs').innerHTML = slotDecks()
     .map((d, i) => `<button type="button" class="${state.active === i ? 'active' : ''}" data-deck="${i}">${DECK_LABELS[i]}: ${esc(d.name)} (${sectionTotal(d.main)})</button>`)
     .join('');
 }
@@ -337,7 +406,7 @@ function renderResults() {
             <div class="spec">${esc(spec)}</div>
             <div class="use ${full ? 'full' : ''}">チーム ${used}/${lim}</div>
           </div>
-          <div class="adds">${DECK_LABELS.map((l, i) => `<button type="button" data-add="${i}" ${full ? 'disabled' : ''} title="デッキ${l}に追加">${l}</button>`).join('')}</div>
+          <div class="adds">${DECK_LABELS.map((l, i) => `<button type="button" data-add="${i}" title="デッキ${l}に追加${full ? '（チームの上限を超えます）' : ''}">${l}</button>`).join('')}</div>
         </div>`;
     })
     .join('');
@@ -352,21 +421,21 @@ function renderDetail() {
   const { cid } = selected;
   const c = cardInfo(cid);
   const lim = limitOf(cid);
-  const perDeck = state.decks.map((d, i) => `${DECK_LABELS[i]}:${SECTIONS.reduce((n, s) => n + countIn(d[s], cid), 0)}`).join(' ');
+  const perDeck = slotDecks().map((d, i) => `${DECK_LABELS[i]}:${SECTIONS.reduce((n, s) => n + countIn(d[s], cid), 0)}`).join(' ');
   let actions = '';
   if (selected.deck === null || selected.deck === undefined) {
     actions = `<div class="act-row">${DECK_LABELS.map((l, i) => `<button type="button" data-dadd="${i}">${l}に追加</button>`).join('')}</div>
       <div class="act-row">${DECK_LABELS.map((l, i) => `<button type="button" data-dadd="${i}" data-dsec="side">${l}サイドに追加</button>`).join('')}</div>`;
   } else {
-    const here = countIn(state.decks[selected.deck][selected.section], cid);
+    const here = countIn(slotDeck(selected.deck)[selected.section], cid);
     const targets = [];
-    state.decks.forEach((d, i) => {
+    slotDecks().forEach((d, i) => {
       for (const s of SECTIONS) {
         if ((i === selected.deck && s === selected.section) || !allowedSection(c, s)) continue;
         targets.push(`<button type="button" data-move="${i}" data-msec="${s}">${DECK_LABELS[i]}・${SECTION_LABEL[s]}へ</button>`);
       }
     });
-    const deck = state.decks[selected.deck];
+    const deck = slotDeck(selected.deck);
     const tags = deck.tags[cid] || [];
     const known = [...new Set([...PRESET_TAGS, ...state.decks.flatMap((d) => Object.values(d.tags).flat())])].filter((t) => !tags.includes(t));
     actions = `<div class="act-row">
@@ -401,6 +470,53 @@ function render() {
   renderTeamStatus();
   renderResults();
   renderDetail();
+  if ($('libraryDialog').open) renderLibrary();
+}
+
+// デッキ一覧: 採用先（A〜C）、名前、枚数、複製・削除
+function renderLibrary() {
+  const rows = state.decks.map((d) => {
+    const slot = slotOf(d.id);
+    const counts = SECTIONS.map((s) => {
+      const n = sectionTotal(d[s]);
+      return `<td class="num ${sectionStatus(s, n) === 'bad' ? 'bad' : ''}">${n}</td>`;
+    }).join('');
+    const slotButtons = DECK_LABELS.map(
+      (l, i) => `<button type="button" class="${slot === i ? 'on' : ''}" data-adopt="${i}" title="${l}に採用${slot >= 0 && slot !== i ? `（${DECK_LABELS[slot]}と入れ替え）` : ''}">${l}</button>`
+    ).join('');
+    const canDelete = slot < 0 && state.decks.length > 3;
+    return `<tr class="${slot >= 0 ? 'adopted' : ''}" data-id="${d.id}">
+        <td><div class="slot-btns">${slotButtons}</div></td>
+        <td><input class="lib-name" value="${esc(d.name)}" maxlength="40" aria-label="デッキ名"></td>
+        ${counts}
+        <td><div class="row-btns">
+          <button type="button" data-dup ${state.decks.length >= MAX_DECKS ? 'disabled' : ''}>複製</button>
+          <button type="button" data-del ${canDelete ? '' : 'disabled'} title="${slot >= 0 ? '採用中のデッキは削除できません' : state.decks.length <= 3 ? 'デッキは3つ以上必要です' : '一覧から削除'}">削除</button>
+        </div></td>
+      </tr>`;
+  });
+  $('libraryTable').innerHTML = `<thead><tr><th>採用</th><th>デッキ名</th><th>メイン</th><th>EX</th><th>サイド</th><th></th></tr></thead><tbody>${rows.join('')}</tbody>`;
+  $('libraryAdd').disabled = state.decks.length >= MAX_DECKS;
+}
+
+function bindLibraryEvents() {
+  $('libraryBtn').addEventListener('click', () => {
+    renderLibrary();
+    $('libraryDialog').showModal();
+  });
+  $('libraryAdd').addEventListener('click', () => createDeck(`デッキ${state.decks.length + 1}`));
+  $('libraryTable').addEventListener('click', (e) => {
+    const id = e.target.closest('tr')?.dataset.id;
+    const b = e.target.closest('button');
+    if (!id || !b) return;
+    if (b.dataset.adopt !== undefined) return pickDeck(Number(b.dataset.adopt), id);
+    if (b.hasAttribute('data-dup')) return createDeck(`${deckById(id).name}のコピー`.slice(0, 40), deckById(id));
+    if (b.hasAttribute('data-del')) return deleteDeck(id);
+  });
+  $('libraryTable').addEventListener('change', (e) => {
+    const id = e.target.closest('tr')?.dataset.id;
+    if (id && e.target.classList.contains('lib-name')) renameDeck(id, e.target.value);
+  });
 }
 
 let toastTimer;
@@ -470,33 +586,49 @@ async function runSearch(page = 1) {
 // ---- インポート・出力・保存 ----
 
 function openImport(deckIdx = state.active) {
-  $('importTarget').innerHTML = state.decks.map((d, i) => `<option value="${i}">${DECK_LABELS[i]}: ${esc(d.name)}</option>`).join('');
-  $('importTarget').value = String(deckIdx);
+  deckTargetOptions($('importTarget'), deckIdx);
   $('importError').textContent = '';
   $('importDialog').showModal();
   $('importUrl').focus();
 }
 
 // 読み込んだデッキ（{ name, main, extra, side }）で指定のデッキを置き換える。チーム制限は超えていても読み込み、警告する
-function applyDeck(deckIdx, deck, cards, action) {
+// 読み込み先の選択肢: 採用中の A〜C（中身を置き換える）か、新しいデッキとして一覧に足す
+function deckTargetOptions(select, slot) {
+  select.innerHTML =
+    slotDecks()
+      .map((d, i) => `<option value="${i}">${DECK_LABELS[i]}: ${esc(d.name)}（置き換え）</option>`)
+      .join('') + `<option value="new" ${state.decks.length >= MAX_DECKS ? 'disabled' : ''}>新しいデッキとして一覧に追加</option>`;
+  select.value = String(slot);
+}
+
+// 読み込んだデッキ（{ name, main, extra, side }）で、target（0〜2 = 採用中の A〜C、'new' = 一覧に新しく足す）を埋める。
+// チーム制限は超えていても読み込み、警告する
+function applyDeck(target, deck, cards, action) {
   Object.assign(state.cards, cards);
+  if (target === 'new') {
+    const created = createDeck(deck.name || '読み込んだデッキ', { ...blankDeck('', ''), ...deck });
+    if (created) toast(`「${created.name}」をデッキの一覧に追加しました（採用するには、列の見出しのメニューで選びます）`);
+    return;
+  }
+  const slot = Number(target);
   mutate(() => {
-    const d = state.decks[deckIdx];
+    const d = slotDeck(slot);
     d.name = deck.name || d.name;
     for (const s of SECTIONS) d[s] = deck[s].map((e) => ({ ...e }));
   }, action);
   const bad = violations();
   if (bad.length) {
-    toast(`登録しました。チーム制限を超えているカードが${bad.length}種類あります`, 'error');
+    toast(`登録しました。チーム制限を超えているカードが${bad.length}種類あります`, 'warn');
     openTeamDialog();
   } else {
-    toast(`デッキ${DECK_LABELS[deckIdx]}に「${state.decks[deckIdx].name}」を登録しました`);
+    toast(`デッキ${DECK_LABELS[slot]}に「${slotDeck(slot).name}」を登録しました`);
   }
 }
 
 async function doImport() {
   const btn = $('importSubmit');
-  const deckIdx = Number($('importTarget').value);
+  const deckIdx = $('importTarget').value;
   btn.disabled = true;
   $('importError').textContent = '読み込み中…';
   try {
@@ -559,8 +691,7 @@ function readReceivedDeck() {
   const { deck } = receivedDeck;
   const total = (s) => sectionTotal(deck[s]);
   $('receiveInfo').textContent = `「${deck.name || '名前なし'}」 メイン ${total('main')}枚・エクストラ ${total('extra')}枚・サイド ${total('side')}枚`;
-  $('receiveTarget').innerHTML = state.decks.map((d, i) => `<option value="${i}">${DECK_LABELS[i]}: ${esc(d.name)}</option>`).join('');
-  $('receiveTarget').value = String(state.active);
+  deckTargetOptions($('receiveTarget'), state.active);
   $('receiveDialog').showModal();
 }
 
@@ -613,7 +744,7 @@ function bindReceiveEvents() {
     const { deck, cards } = receivedDeck;
     receivedDeck = null;
     $('receiveDialog').close();
-    applyDeck(Number($('receiveTarget').value), deck, cards, '非公開デッキを受け取り');
+    applyDeck($('receiveTarget').value, deck, cards, '非公開デッキを受け取り');
     completeCardInfo(Object.keys(cards));
   });
 }
@@ -626,8 +757,7 @@ let review = null; // { name, main: { rows }, extra, side }
 const featureCache = new Map(); // 画像のパラメータ → カード画像の特徴量
 
 function openImageDialog(deckIdx = state.active) {
-  $('imageTarget').innerHTML = state.decks.map((d, i) => `<option value="${i}">${DECK_LABELS[i]}: ${esc(d.name)}</option>`).join('');
-  $('imageTarget').value = String(deckIdx);
+  deckTargetOptions($('imageTarget'), deckIdx);
   showImageStep(1);
   $('imageDialog').showModal();
 }
@@ -856,7 +986,7 @@ function registerImage() {
   }
   if (skipped && !confirm(`未確定のカード${skipped}枚は登録されません。登録しますか？`)) return;
   $('imageDialog').close();
-  applyDeck(Number($('imageTarget').value), deck, cards, '画像から登録');
+  applyDeck($('imageTarget').value, deck, cards, '画像から登録');
 }
 
 function bindImageEvents() {
@@ -926,7 +1056,7 @@ function bindImageEvents() {
 }
 
 function exportText() {
-  return state.decks
+  return slotDecks()
     .map((d, i) => {
       const parts = [`【デッキ${DECK_LABELS[i]}】${d.name}`];
       for (const s of SECTIONS) {
@@ -965,7 +1095,7 @@ function baseCell(show, n, pct) {
 }
 
 function renderHandSim() {
-  const d = state.decks[handDeck];
+  const d = slotDeck(handDeck);
   const res = simulateHands(d.main, d.tags, {
     trials: HAND_TRIALS,
     hand: HAND_SIZE,
@@ -1093,7 +1223,7 @@ function renderTagResults({ res, pct, withDraw }) {
 }
 
 function openTeamDialog() {
-  const cids = [...new Set(state.decks.flatMap((d) => SECTIONS.flatMap((s) => d[s].map((e) => e.cid))))];
+  const cids = [...new Set(slotDecks().flatMap((d) => SECTIONS.flatMap((s) => d[s].map((e) => e.cid))))];
   const rows = cids
     .map((cid) => ({ cid, used: teamCount(cid), lim: limitOf(cid) }))
     .sort((a, b) => b.used - b.lim - (a.used - a.lim) || b.used - a.used);
@@ -1101,7 +1231,7 @@ function openTeamDialog() {
     `<thead><tr><th>カード名</th><th>区分</th>${DECK_LABELS.map((l) => `<th>${l}</th>`).join('')}<th>合計/上限</th></tr></thead><tbody>` +
     rows
       .map(({ cid, used, lim }) => {
-        const per = state.decks.map((d) => SECTIONS.reduce((n, s) => n + countIn(d[s], cid), 0) || '');
+        const per = slotDecks().map((d) => SECTIONS.reduce((n, s) => n + countIn(d[s], cid), 0) || '');
         return `<tr class="${used > lim ? 'over' : used === lim ? 'full' : ''}"><td>${esc(cardInfo(cid).name)}</td><td>${lim < 3 ? `<span class="lim-inline">${limitBadge(cid)}${LIMIT_NAME[lim]}</span>` : ''}</td>${per
           .map((n) => `<td class="num">${n}</td>`)
           .join('')}<td class="num">${used}/${lim}</td></tr>`;
@@ -1112,7 +1242,7 @@ function openTeamDialog() {
 }
 
 function downloadSave() {
-  const blob = new Blob([JSON.stringify({ app: 'ygo-team-deck', version: 1, decks: state.decks, cards: state.cards }, null, 1)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: 'ygo-team-deck', version: 2, decks: state.decks, slots: state.slots, cards: state.cards }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `team-deck-${new Date().toISOString().slice(0, 10)}.json`;
@@ -1120,23 +1250,29 @@ function downloadSave() {
   URL.revokeObjectURL(a.href);
 }
 
+// 保存したファイルを読み込む。今のデッキは消さずに、ファイルのデッキを一覧に足し、ファイルで採用していた 3 デッキを採用する
+// （以前の形式の 3 デッキだけのファイルも読める）
 async function loadSave(file) {
+  let data;
   try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.decks) || data.decks.length !== 3) throw new Error();
-    Object.assign(state.cards, data.cards || {});
-    mutate(() => {
-      state.decks = data.decks.map((d, i) => ({
-        name: String(d.name || `デッキ${DECK_LABELS[i]}`),
-        ...Object.fromEntries(SECTIONS.map((s) => [s, (d[s] || []).filter((e) => /^\d+$/.test(e.cid) && e.count > 0).map((e) => ({ cid: e.cid, count: Number(e.count) }))])),
-        tags: cleanDeckTags(d.tags),
-        draws: cleanDeckDraws(d.draws),
-      }));
-    }, '読込（ファイル）');
-    toast('読み込みました');
+    data = JSON.parse(await file.text());
+    if (!Array.isArray(data.decks) || !data.decks.length) throw new Error();
   } catch {
-    toast('このファイルは読み込めません', 'error');
+    return toast('このファイルは読み込めません', 'error');
   }
+  const loaded = normalizeDeckSet(data.decks, data.slots, newDeckId);
+  // 今の一覧と id がぶつからないよう、読み込んだデッキには新しい id を付け直す
+  const ids = new Map(loaded.decks.map((d) => [d.id, newDeckId()]));
+  const decks = loaded.decks.map((d) => ({ ...d, id: ids.get(d.id) }));
+  if (state.decks.length + decks.length > MAX_DECKS) {
+    return toast(`デッキが${MAX_DECKS}個を超えるため読み込めません（ファイルに${decks.length}個）。使わないデッキを一覧から削除してください`, 'error');
+  }
+  Object.assign(state.cards, data.cards || {});
+  mutate(() => {
+    state.decks = [...state.decks, ...decks];
+    state.slots = loaded.slots.map((id) => ids.get(id));
+  }, '読込（ファイル）');
+  toast(`ファイルのデッキ${decks.length}個を一覧に追加し、採用しました（それまでのデッキは一覧に残っています）`);
 }
 
 // ---- イベント ----
@@ -1189,7 +1325,7 @@ function connectRoom(r) {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/room/${r.id}`);
   r.ws = ws;
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'hello', name: myName(), seed: r.seed ? { decks: state.decks, cards: usedCards() } : undefined }));
+    ws.send(JSON.stringify({ type: 'hello', name: myName(), seed: r.seed ? { decks: state.decks, slots: state.slots, cards: usedCards() } : undefined }));
   };
   ws.onmessage = (e) => {
     if (room !== r) return;
@@ -1222,11 +1358,11 @@ function onRoomMessage(r, msg) {
     r.everJoined = true;
     r.seed = false;
     r.retry = 0;
-    state.decks = normalizeDecks(msg.decks);
+    Object.assign(state, normalizeDeckSet(msg.decks, msg.slots, newDeckId));
     Object.assign(state.cards, msg.cards);
     const pending = r.pending;
     r.pending = [];
-    applyOps(state.decks, pending);
+    applyOps(state, pending);
     undoStack.length = 0;
     redoStack.length = 0;
     sendRoomOps(pending, '切断中の変更');
@@ -1250,7 +1386,7 @@ function onRoomMessage(r, msg) {
     }
     const ops = msg.ops.filter((op) => !r.inflight.has(opKey(op)));
     if (!ops.length) return;
-    applyOps(state.decks, ops);
+    applyOps(state, ops);
     // ほかの人の変更をまたいで「元に戻す」と、その変更まで消してしまうので履歴を捨てる
     undoStack.length = 0;
     redoStack.length = 0;
@@ -1304,6 +1440,7 @@ function leaveRoom(keepAsk = true) {
   } else {
     const local = loadState();
     state.decks = local.decks;
+    state.slots = local.slots;
     Object.assign(state.cards, local.cards);
   }
   undoStack.length = 0;
@@ -1459,7 +1596,7 @@ function bindEvents() {
       if (act.dataset.act === 'import') return openImport(i);
       if (act.dataset.act === 'hands') return openHandSim(i);
       if (act.dataset.act === 'clear' && confirm(`デッキ${DECK_LABELS[i]}のカードをすべて外しますか？`)) {
-        mutate(() => SECTIONS.forEach((s) => (state.decks[i][s] = [])), 'クリア');
+        mutate(() => SECTIONS.forEach((s) => (slotDeck(i)[s] = [])), 'クリア');
       }
       return;
     }
@@ -1479,10 +1616,15 @@ function bindEvents() {
     removeCard(tile.dataset.cid, Number(tile.dataset.deck), tile.dataset.section);
   });
   $('decks').addEventListener('change', (e) => {
-    if (!e.target.classList.contains('deck-name')) return;
     const i = Number(e.target.dataset.deck);
+    if (e.target.classList.contains('deck-pick')) {
+      if (e.target.value === '__new') createDeck(`デッキ${state.decks.length + 1}`, null, i);
+      else pickDeck(i, e.target.value);
+      return;
+    }
+    if (!e.target.classList.contains('deck-name')) return;
     const name = e.target.value.trim() || `デッキ${DECK_LABELS[i]}`;
-    mutate(() => (state.decks[i].name = name), 'デッキ名');
+    renameDeck(slotDeck(i).id, name);
   });
   $('deckTabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');
@@ -1504,7 +1646,7 @@ function bindEvents() {
     if (b.hasAttribute('data-dplus')) return addCard(cid, selected.deck, selected.section);
     if (b.hasAttribute('data-dminus')) return removeCard(cid, selected.deck, selected.section);
     if (b.hasAttribute('data-dremove')) return removeCard(cid, selected.deck, selected.section, 99);
-    const tags = state.decks[selected.deck]?.tags[cid] || [];
+    const tags = slotDeck(selected.deck)?.tags[cid] || [];
     if (b.dataset.untag !== undefined) return setTags(selected.deck, cid, tags.filter((t) => t !== b.dataset.untag));
     if (b.dataset.addtag !== undefined) return setTags(selected.deck, cid, [...tags, b.dataset.addtag]);
   });
@@ -1518,7 +1660,7 @@ function bindEvents() {
     e.preventDefault();
     const tag = e.target.value.trim();
     if (!tag) return;
-    setTags(selected.deck, selected.cid, [...(state.decks[selected.deck].tags[selected.cid] || []), tag]);
+    setTags(selected.deck, selected.cid, [...(slotDeck(selected.deck).tags[selected.cid] || []), tag]);
     $('tagInput')?.focus();
   });
   $('detail').addEventListener('change', (e) => {
@@ -1629,6 +1771,7 @@ bindEvents();
 bindImageEvents();
 bindRoomEvents();
 bindReceiveEvents();
+bindLibraryEvents();
 render();
 loadLimits();
 readReceivedDeck(); // ルームに入ると URL が書き換わるので、その前に # のデッキを読む

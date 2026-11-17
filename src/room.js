@@ -1,18 +1,18 @@
 // ルーム 1 つ分のサーバー（Cloudflare Durable Object）。
-// 3 デッキの内容を保存し、つながっている全員に変更を同じ順番で配る。
+// デッキの一覧と採用中の 3 デッキを保存し、つながっている全員に変更を同じ順番で配る。
 //
 // やりとり（WebSocket、JSON）:
-//   ブラウザ → { type: 'hello', seed?, name }  参加。seed（{ decks, cards }）付きなら、ルームがまだなければそれで作る
+//   ブラウザ → { type: 'hello', seed?, name }  参加。seed（{ decks, slots, cards }）付きなら、ルームがまだなければそれで作る
 //   ブラウザ → { type: 'name', name }          名前を変える
 //   ブラウザ → { type: 'ops', id, from, ops, cards, action }  変更（op の形は public/roomsync.js）。action は操作の種類
 //   ブラウザ → { type: 'log', before? }        変更履歴を新しい順に 50 件。before（前回の最後の key）より古いもの
-//   サーバー → { type: 'init', decks, cards }   参加したときの今の内容
+//   サーバー → { type: 'init', decks, slots, cards }  参加したときの今の内容（変更がぶつかって当てられなかったときにも送り直す）
 //   サーバー → { type: 'ops', id, from, ops, cards }  受け付けた変更（送った本人にも返す）
 //   サーバー → { type: 'log', entries, more }  変更履歴（{ key, t, name, action, lines }）
 //   サーバー → { type: 'logEntry', entry }     新しく記録した変更履歴
 //   サーバー → { type: 'peers', count, names }  つながっている人数と名前
 //   サーバー → { type: 'error', code, message }
-import { ROOM_SECTIONS, applyOps, cleanDeckDraws, cleanDeckTags, validOps } from '../public/roomsync.js';
+import { ROOM_SECTIONS, applyOps, normalizeDeckSet, validOps } from '../public/roomsync.js';
 
 const MAX_MESSAGE = 512 * 1024;
 const IDLE_MS = 30 * 24 * 60 * 60 * 1000; // 最後の変更からこの期間たったルームは消す
@@ -24,23 +24,40 @@ const SECTION_LABEL = { main: 'メイン', extra: 'エクストラ', side: 'サ�
 const cleanName = (name) => (typeof name === 'string' && name.trim() ? name.trim().slice(0, 20) : '名無し');
 
 // 変更の中身を、履歴に出す短い文にする。適用する前のデッキと比べるので、適用する前に呼ぶ
-function describeOps(decks, cards, ops) {
+function describeOps(room, cards, ops) {
   const lines = [];
-  decks.forEach((deck, d) => {
-    const items = ops
-      .filter((op) => op.d === d)
-      .map((op) => {
-        const card = cards[op.cid]?.name || `cid:${op.cid}`;
-        if ('name' in op) return `デッキ名「${deck.name}」→「${op.name}」`;
-        if ('tags' in op) return `${card} のタグ → ${op.tags.length ? op.tags.join('・') : 'なし'}`;
-        if ('draw' in op) return `${card} のドロー枚数 → ${op.draw || '既定'}`;
-        const before = deck[op.s].find((e) => e.cid === op.cid)?.count || 0;
-        return `${card} ${before}→${op.count}枚（${SECTION_LABEL[op.s]}）`;
-      });
-    if (!items.length) return;
+  const created = new Map(ops.filter((op) => 'create' in op).map((op) => [op.d, op.create]));
+  const nameOf = (id) => room.decks.find((d) => d.id === id)?.name ?? created.get(id)?.name ?? '';
+  const label = (id) => {
+    const i = room.slots.indexOf(id);
+    return i >= 0 ? `デッキ${'ABC'[i]}` : '控え';
+  };
+  const total = (deck) => ROOM_SECTIONS.reduce((n, s) => n + deck[s].reduce((m, e) => m + e.count, 0), 0);
+  for (const id of [...new Set(ops.filter((op) => 'd' in op).map((op) => op.d))]) {
+    const mine = ops.filter((op) => op.d === id);
+    if (created.has(id)) {
+      lines.push(`デッキ「${created.get(id).name}」を一覧に追加（${total(created.get(id))}枚）`);
+      continue;
+    }
+    const deck = room.decks.find((d) => d.id === id);
+    if (!deck) continue;
+    if (mine.some((op) => 'remove' in op)) {
+      lines.push(`デッキ「${deck.name}」を一覧から削除`);
+      continue;
+    }
+    const items = mine.map((op) => {
+      const card = cards[op.cid]?.name || `cid:${op.cid}`;
+      if ('name' in op) return `デッキ名「${deck.name}」→「${op.name}」`;
+      if ('tags' in op) return `${card} のタグ → ${op.tags.length ? op.tags.join('・') : 'なし'}`;
+      if ('draw' in op) return `${card} のドロー枚数 → ${op.draw || '既定'}`;
+      const before = deck[op.s].find((e) => e.cid === op.cid)?.count || 0;
+      return `${card} ${before}→${op.count}枚（${SECTION_LABEL[op.s]}）`;
+    });
     const shown = items.length > 8 ? [...items.slice(0, 6), `ほか ${items.length - 6}件`] : items;
-    lines.push(`デッキ${'ABC'[d]}「${deck.name}」: ${shown.join('、')}`);
-  });
+    lines.push(`${label(id)}「${deck.name}」: ${shown.join('、')}`);
+  }
+  const slots = ops.find((op) => 'slots' in op)?.slots;
+  if (slots) lines.push(`採用デッキ: ${slots.map((id, i) => `${'ABC'[i]}「${nameOf(id)}」`).join(' ')}`);
   return lines;
 }
 
@@ -55,22 +72,6 @@ function cleanCards(cards) {
     out[cid] = card;
   }
   return out;
-}
-
-function cleanDecks(decks) {
-  if (!Array.isArray(decks) || decks.length !== 3) return null;
-  return decks.map((d, i) => {
-    const deck = { name: typeof d?.name === 'string' ? d.name.slice(0, 40) : `デッキ${'ABC'[i]}` };
-    for (const s of ROOM_SECTIONS) {
-      deck[s] = (Array.isArray(d?.[s]) ? d[s] : [])
-        .filter((e) => /^\d{1,8}$/.test(e?.cid) && Number.isInteger(e.count) && e.count > 0 && e.count <= 60)
-        .slice(0, 100)
-        .map((e) => ({ cid: e.cid, count: e.count }));
-    }
-    deck.tags = cleanDeckTags(d?.tags);
-    deck.draws = cleanDeckDraws(d?.draws);
-    return deck;
-  });
 }
 
 function send(ws, data) {
@@ -186,26 +187,30 @@ export class DeckRoom {
       return;
     }
     let room = await this.ctx.storage.get('room');
+    // デッキの一覧と採用枠がなかった頃のルーム（3 デッキだけ）は、ここで移行する
+    if (room && !Array.isArray(room.slots)) {
+      room = { ...normalizeDeckSet(room.decks), cards: room.cards || {} };
+      await this.save(room);
+    }
 
     if (msg.type === 'hello') {
       const name = cleanName(msg.name);
       let created = false;
-      if (!room && msg.seed) {
-        const decks = cleanDecks(msg.seed.decks);
-        if (decks) {
-          room = { decks, cards: cleanCards(msg.seed.cards) };
-          await this.save(room);
-          created = true;
-        }
+      if (!room && msg.seed && Array.isArray(msg.seed.decks)) {
+        room = { ...normalizeDeckSet(msg.seed.decks, msg.seed.slots), cards: cleanCards(msg.seed.cards) };
+        await this.save(room);
+        created = true;
       }
       if (!room) {
         send(ws, { type: 'error', code: 'notfound', message: 'ルームが見つかりません（URL が違うか、30日間使われずに削除されました）' });
         return ws.close(4004, 'not found');
       }
       ws.serializeAttachment({ joined: true, name });
-      send(ws, { type: 'init', decks: room.decks, cards: room.cards });
+      send(ws, { type: 'init', decks: room.decks, slots: room.slots, cards: room.cards });
       this.broadcastPeers();
-      if (created) await this.addLog(name, 'ルームを作成', room.decks.map((d, i) => `デッキ${'ABC'[i]}「${d.name}」`));
+      if (created) {
+        await this.addLog(name, 'ルームを作成', room.slots.map((id, i) => `デッキ${'ABC'[i]}「${room.decks.find((d) => d.id === id).name}」`));
+      }
       return;
     }
 
@@ -227,15 +232,30 @@ export class DeckRoom {
     }
 
     if (msg.type === 'ops') {
-      const ops = validOps(msg.ops);
+      // 更新前に開いていたページは、デッキを番号（0〜2 = A〜C）で送ってくるので、採用中のデッキの id に読み替える
+      const raw = Array.isArray(msg.ops) ? msg.ops.map((op) => (Number.isInteger(op?.d) ? { ...op, d: room.slots[op.d] } : op)) : [];
+      const ops = validOps(raw);
       if (!ops.length) return;
       const cards = cleanCards(msg.cards);
-      const lines = describeOps(room.decks, { ...room.cards, ...cards }, ops);
-      applyOps(room.decks, ops);
+      // 1 つずつ当てて、当てられた変更だけを履歴に書く（ほかの人の変更とぶつかって当てられないものもある）
+      const before = JSON.parse(JSON.stringify({ decks: room.decks, slots: room.slots }));
+      const accepted = [];
+      let rejected = 0;
+      for (const op of ops) {
+        if (applyOps(room, [op])) rejected++;
+        else accepted.push(op);
+      }
+      const lines = describeOps(before, { ...room.cards, ...cards }, accepted);
+      if (rejected) lines.push(`ほかの人の変更とぶつかったため、${rejected}件は反映されませんでした`);
       Object.assign(room.cards, cards);
       await this.save(room);
       const out = JSON.stringify({ type: 'ops', id: String(msg.id || '').slice(0, 20), from: String(msg.from || '').slice(0, 20), ops, cards });
       for (const peer of this.joined()) send(peer, out);
+      // ほかの人の変更とぶつかって当てられなかった変更があれば、全員の内容をサーバーの内容にそろえ直す
+      if (rejected) {
+        const init = JSON.stringify({ type: 'init', decks: room.decks, slots: room.slots, cards: room.cards });
+        for (const peer of this.joined()) send(peer, init);
+      }
       const action = typeof msg.action === 'string' && msg.action.trim() ? msg.action.trim().slice(0, 30) : '編集';
       await this.addLog(me.name || '名無し', action, lines);
     }
